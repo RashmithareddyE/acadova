@@ -1,20 +1,20 @@
-{
-  "name": "acadova-frontend",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "react-router-dom": "^7.18.4"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "^6.1.2",
-    "vite": "^8.3.4"
-  }
+import { Navigate, Route, Routes } from 'react-router-dom';
+import { ProtectedRoute, PublicOnlyRoute } from './components/RouteGuards';
+import Dashboard from './pages/Dashboard';
+import Login from './pages/Login';
+import Register from './pages/Register';
+
+export default function App() {
+  return (
+    <Routes>
+      <Route element={<PublicOnlyRoute />}>
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+      </Route>
+      <Route element={<ProtectedRoute />}>
+        <Route path="/dashboard" element={<Dashboard />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+    </Routes>
+  );
 }

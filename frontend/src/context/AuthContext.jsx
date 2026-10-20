@@ -1,425 +1,77 @@
-:root {
-  --ink: #12282b;
-  --ink-soft: #1d3a3e;
-  --paper: #eef2f1;
-  --surface: #ffffff;
-  --line: #d3dcda;
-  --muted: #566b6e;
-  --primary: #0e6b5c;
-  --primary-strong: #0a5448;
-  --marigold: #f2b632;
-  --danger: #b42318;
-  --danger-bg: #fdecea;
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { authApi } from '../lib/api';
 
-  --font-display: 'Bricolage Grotesque', 'Segoe UI', system-ui, sans-serif;
-  --font-body: 'Instrument Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --radius: 10px;
-}
+const AuthContext = createContext(null);
 
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
+// status: 'loading' (checking session) | 'authenticated' | 'anonymous'
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
+  const [status, setStatus] = useState('loading');
 
-html {
-  -webkit-text-size-adjust: 100%;
-}
+  // Restore the session on page load. The httpOnly cookie is sent automatically;
+  // a 401 here simply means nobody is logged in.
+  useEffect(() => {
+    let cancelled = false;
+    authApi
+      .me()
+      .then(({ user: current }) => {
+        if (cancelled) return;
+        setUser(current);
+        setStatus('authenticated');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setUser(null);
+        setStatus('anonymous');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-body {
-  margin: 0;
-  background: var(--paper);
-  color: var(--ink);
-  font-family: var(--font-body);
-  font-size: 1rem;
-  line-height: 1.55;
-}
+  // After login/register the user is always read back from the protected /auth/me
+  // endpoint, so the app state reflects what the server considers the current user.
+  const loadCurrentUser = useCallback(async () => {
+    const { user: current } = await authApi.me();
+    setUser(current);
+    setStatus('authenticated');
+  }, []);
 
-h1,
-h2 {
-  font-family: var(--font-display);
-  font-weight: 700;
-  line-height: 1.15;
-  margin: 0;
-  letter-spacing: -0.015em;
-}
+  const login = useCallback(
+    async (credentials) => {
+      await authApi.login(credentials);
+      await loadCurrentUser();
+    },
+    [loadCurrentUser]
+  );
 
-p {
-  margin: 0;
-}
+  const register = useCallback(
+    async (details) => {
+      await authApi.register(details);
+      await loadCurrentUser();
+    },
+    [loadCurrentUser]
+  );
 
-a {
-  color: var(--primary);
-  font-weight: 500;
-}
+  const logout = useCallback(async () => {
+    try {
+      await authApi.logout();
+    } finally {
+      setUser(null);
+      setStatus('anonymous');
+    }
+  }, []);
 
-:focus-visible {
-  outline: 3px solid var(--marigold);
-  outline-offset: 2px;
-}
+  const value = useMemo(
+    () => ({ user, status, login, register, logout }),
+    [user, status, login, register, logout]
+  );
 
-/* ---------- Brand ---------- */
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.6rem;
-  color: var(--ink);
-}
-.brand__name {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 1.3rem;
-  letter-spacing: -0.02em;
-}
-.brand--on-dark {
-  color: #fff;
-}
-.brand--on-dark svg rect {
-  fill: var(--marigold);
-}
-.brand--on-dark svg path {
-  stroke: var(--ink);
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-/* ---------- Loaders ---------- */
-.page-loader {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-}
-.spinner {
-  display: inline-block;
-  width: 1.1em;
-  height: 1.1em;
-  border: 2.5px solid currentColor;
-  border-right-color: transparent;
-  border-radius: 50%;
-  animation: spin 0.7s linear infinite;
-}
-.page-loader .spinner {
-  width: 2rem;
-  height: 2rem;
-  color: var(--primary);
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* ---------- Buttons ---------- */
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.55rem;
-  min-height: 44px;
-  padding: 0 1.1rem;
-  border-radius: var(--radius);
-  border: 1px solid transparent;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color 0.15s, border-color 0.15s;
-}
-.btn:disabled {
-  cursor: progress;
-  opacity: 0.75;
-}
-.btn--primary {
-  background: var(--primary);
-  color: #fff;
-}
-.btn--primary:hover:not(:disabled) {
-  background: var(--primary-strong);
-}
-.btn--block {
-  width: 100%;
-  margin-top: 0.5rem;
-}
-.btn--ghost {
-  background: transparent;
-  border-color: var(--line);
-  color: var(--ink);
-}
-.btn--ghost:hover:not(:disabled) {
-  border-color: var(--ink);
-}
-
-/* ---------- Forms ---------- */
-.field {
-  margin-bottom: 1.1rem;
-}
-.field label {
-  display: block;
-  margin-bottom: 0.35rem;
-  font-weight: 600;
-  font-size: 0.95rem;
-}
-.field input {
-  width: 100%;
-  min-height: 46px;
-  padding: 0 0.85rem;
-  border: 1px solid #b5c3c1;
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--ink);
-  font: inherit;
-}
-.field input:hover {
-  border-color: var(--muted);
-}
-.field input:focus {
-  outline: 3px solid rgba(14, 107, 92, 0.25);
-  outline-offset: 0;
-  border-color: var(--primary);
-}
-.field input.is-invalid {
-  border-color: var(--danger);
-}
-.field__error,
-.field__hint {
-  margin-top: 0.35rem;
-  font-size: 0.875rem;
-}
-.field__error {
-  color: var(--danger);
-}
-.field__hint {
-  color: var(--muted);
-}
-.alert {
-  margin-bottom: 1.1rem;
-  padding: 0.7rem 0.9rem;
-  border-radius: var(--radius);
-  background: var(--danger-bg);
-  color: var(--danger);
-  font-size: 0.95rem;
-  font-weight: 500;
-}
-
-/* ---------- Auth screens ---------- */
-.auth {
-  min-height: 100vh;
-  display: grid;
-  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
-}
-.auth__aside {
-  background: var(--ink);
-  color: #fff;
-  padding: 2.5rem 3rem;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-}
-.auth__pitch {
-  max-width: 26rem;
-  padding-bottom: 3rem;
-}
-.auth__pitch h2 {
-  font-size: clamp(2rem, 3.2vw, 3rem);
-}
-.auth__pitch p {
-  margin-top: 1rem;
-  color: #b8cccd;
-  font-size: 1.05rem;
-}
-.auth__main {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 2rem 1.25rem;
-}
-.auth__mobile-brand {
-  display: none;
-  margin-bottom: 1.5rem;
-}
-.auth__card {
-  width: 100%;
-  max-width: 26rem;
-}
-.auth__card h1 {
-  font-size: 2rem;
-}
-.auth__subtitle {
-  margin: 0.4rem 0 1.75rem;
-  color: var(--muted);
-}
-.auth__footer {
-  margin-top: 1.5rem;
-  color: var(--muted);
-  text-align: center;
-}
-
-/* ---------- Dashboard ---------- */
-.dash__bar {
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
-}
-.dash__bar-inner {
-  max-width: 72rem;
-  margin: 0 auto;
-  padding: 0.75rem 1.5rem;
-  display: flex;
-  align-items: center;
-  gap: 2rem;
-}
-.dash__nav {
-  display: flex;
-  gap: 0.25rem;
-  flex: 1;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.dash__nav::-webkit-scrollbar {
-  display: none;
-}
-.dash__link {
-  padding: 0.45rem 0.8rem;
-  border-radius: 8px;
-  color: var(--ink);
-  font-weight: 500;
-  text-decoration: none;
-  white-space: nowrap;
-}
-.dash__link--active {
-  background: var(--paper);
-  font-weight: 600;
-}
-.dash__link--soon {
-  color: #7d9093;
-  cursor: not-allowed;
-}
-.dash__user {
-  display: flex;
-  align-items: center;
-  gap: 0.9rem;
-}
-.dash__email {
-  color: var(--muted);
-  font-size: 0.9rem;
-  max-width: 14rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.dash__main {
-  max-width: 72rem;
-  margin: 0 auto;
-  padding: 3rem 1.5rem 4rem;
-}
-.dash__title {
-  font-size: clamp(2rem, 4vw, 3rem);
-}
-.dash__lead {
-  margin-top: 0.6rem;
-  color: var(--muted);
-  font-size: 1.05rem;
-}
-
-.grid {
-  margin-top: 2.5rem;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1.25rem;
-}
-.card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.6rem;
-  padding: 1.5rem;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-}
-.card h2 {
-  font-size: 1.35rem;
-}
-.card p {
-  color: var(--muted);
-  flex: 1;
-}
-.chip {
-  margin-top: 0.6rem;
-  padding: 0.2rem 0.65rem;
-  border-radius: 999px;
-  background: var(--paper);
-  color: var(--muted);
-  font-size: 0.85rem;
-  font-weight: 500;
-}
-.card--featured {
-  grid-column: span 2;
-  background: var(--ink);
-  border-color: var(--ink);
-  color: #fff;
-  padding: 2rem;
-}
-.card--featured h2 {
-  font-size: 1.9rem;
-}
-.card--featured p {
-  color: #b8cccd;
-  max-width: 32rem;
-  font-size: 1.05rem;
-}
-.card--featured .chip {
-  background: var(--marigold);
-  color: var(--ink);
-  font-weight: 600;
-}
-
-/* ---------- Responsive ---------- */
-@media (max-width: 900px) {
-  .auth {
-    grid-template-columns: 1fr;
-  }
-  .auth__aside {
-    display: none;
-  }
-  .auth__mobile-brand {
-    display: block;
-  }
-  .grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .card--featured {
-    grid-column: span 2;
-  }
-  .dash__bar-inner {
-    flex-wrap: wrap;
-    gap: 0.75rem 1rem;
-  }
-  .dash__nav {
-    order: 3;
-    flex-basis: 100%;
-  }
-  .dash__user {
-    margin-left: auto;
-  }
-}
-@media (max-width: 560px) {
-  .grid {
-    grid-template-columns: 1fr;
-  }
-  .card--featured {
-    grid-column: auto;
-  }
-  .dash__email {
-    display: none;
-  }
-  .dash__main {
-    padding-top: 2rem;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .spinner {
-    animation-duration: 1.6s;
-  }
-  .btn {
-    transition: none;
-  }
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used inside <AuthProvider>');
+  return ctx;
 }

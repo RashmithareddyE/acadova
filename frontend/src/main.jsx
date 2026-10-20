@@ -1,7 +1,16 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
+import App from './App';
+import { AuthProvider } from './context/AuthContext';
+import './styles.css';
 
-export default defineConfig({
-  plugins: [react()],
-  server: { port: 5173, strictPort: true },
-});
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
+    <BrowserRouter>
+      <AuthProvider>
+        <App />
+      </AuthProvider>
+    </BrowserRouter>
+  </StrictMode>
+);
