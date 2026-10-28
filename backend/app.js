@@ -3,6 +3,12 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const env = require('./config/env');
 const authRoutes = require('./routes/authRoutes');
+const academicRoutes = require('./routes/academicRoutes');
+const attendanceRoutes = require('./routes/attendanceRoutes');
+const importRoutes = require('./routes/importRoutes');
+const studyPlannerRoutes = require('./routes/studyPlannerRoutes');
+const organizerRoutes = require('./routes/organizerRoutes');
+const copilotRoutes = require('./routes/copilotRoutes');
 const { notFound, errorHandler } = require('./middleware/errorHandler');
 
 const app = express();
@@ -27,6 +33,12 @@ app.get('/api/health', (req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/academic', academicRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use('/api/imports', importRoutes);
+app.use('/api/study-planner', studyPlannerRoutes);
+app.use('/api/tasks', organizerRoutes);
+app.use('/api/copilot', copilotRoutes);
 
 app.use('/api', notFound);
 app.use(errorHandler);

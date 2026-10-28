@@ -27,6 +27,7 @@ const env = {
     .split(',')
     .map((url) => url.trim().replace(/\/$/, ''))
     .filter(Boolean),
+  pdfToTextPath: process.env.PDFTOTEXT_PATH || 'pdftotext',
 };
 
 module.exports = env;

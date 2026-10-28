@@ -16,6 +16,7 @@ const userSchema = new mongoose.Schema(
     },
     // select: false keeps the hash out of every query unless explicitly requested.
     password: { type: String, required: [true, 'Password is required'], select: false },
+    attendanceTarget: { type: Number, enum: [75, 80], default: 75 },
   },
   {
     timestamps: true,
