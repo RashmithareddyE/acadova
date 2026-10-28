@@ -1,6 +1,39 @@
 # Acadova project progress
 
-Updated: 2026-10-27
+Updated: 2026-10-28
+
+## Phase 8 stabilization and QA status
+
+### Verified working in the current repository
+
+- Backend API and ownership checks are in place and enforce authenticated student scoping for academic, attendance, organizer, planner, and import routes.
+- Attendance calculation logic is covered by backend tests for target states, recovery counts, safe-miss allowances, and exclusion of cancelled classes.
+- Study planner, assignment organizer, import/OCR, and document-processing flows pass the existing backend test suite.
+- The Vite frontend builds successfully for production.
+
+### Audit checklist
+
+- Implemented features: student auth, protected web routes, academic CRUD, attendance tracking, organizer tasks, exam and syllabus data, planner, Copilot assistant, and automated document import/OCR flow.
+- Incomplete features: live browser E2E verification against a running MongoDB instance and any optional external AI/vision integrations remain outside verified runtime confirmation.
+- Broken integrations: no critical production build regression was identified in the current repo state.
+- Duplicate implementations: no duplicate academic or auth model was identified; the project keeps a single backend source of truth.
+- Missing environment variables: backend `.env` and frontend `.env` are required locally before the app starts; example files are present and contain required names without secrets.
+- Incorrect API URLs: frontend `VITE_API_URL` must point to the backend API base URL and must include `/api`.
+- Invalid imports: none identified in the currently built frontend.
+- Broken routes: none identified in the current build and backend tests.
+- Missing error handling: backend error middleware and API validation are in place; UI-level error messaging is present across the implemented pages.
+- Security issues: no committed secrets were found in the repository; the project requires local `.env` configuration and does not expose secrets to the frontend.
+- Existing test coverage: backend tests are the primary validation layer, and the frontend has a successful production build.
+
+### Validation executed
+
+- `node --test test/*.test.js` in `backend`: passed.
+- `npm run build` in `frontend`: passed.
+
+### Operational limitations
+
+- The backend requires a MongoDB instance and valid `.env` values to run in a live environment.
+- Optional AI/vision services remain optional and are not required for the primary workflow.
 
 ## Revised roadmap status: Phase 2 Academic Data Intake
 
@@ -275,3 +308,45 @@ Phase 3 dashboard work is complete for this request. No Phase 4 work was started
 - Organizer tasks currently have no reliable subject association or work-duration estimate. Pending assignment due dates are conservatively blocked for the entire day; assignment study sessions are not fabricated. Manual study tasks created in Organizer remain separate from topic-based study sessions.
 - The scheduler creates sessions for confirmed, unfinished syllabus topics. Subjects without syllabus topics remain visible and do not block planning, but require a manual Organizer task until real topics are added.
 - MongoDB persistence/index rollout and browser flows require local verification; the automated tests use deterministic logic or mocked model operations rather than a running database.
+
+## Submission readiness
+
+### Implemented features verified in the current repository
+
+- secure authentication and route protection
+- subject, timetable, exam, syllabus, and calendar management
+- attendance tracking with target warnings and safe-miss/recovery guidance
+- organizer task management
+- study planner and session generation
+- rule-based Copilot-style responses
+
+### Partially implemented or environment-dependent features
+
+- live browser validation against a running MongoDB instance
+- advanced OCR tuning for difficult academic timetable images
+
+### Incomplete features
+
+- any unverified end-to-end workflow that has not been run with a real database and active web UI
+- optional enhancements that are not required for the core presentable workflow
+
+### Tests actually executed
+
+- Backend: `cd backend && node --test test/*.test.js` — passed
+- Frontend build: `cd frontend && npm run build` — passed
+
+### Known bugs / risks
+
+- no critical code-level defect was identified in the current repository state
+- the app still requires a valid local `.env` setup and MongoDB instance to run successfully
+- document OCR remains a heuristic workflow and should be treated as review-assisted rather than fully autonomous
+
+### Documentation created for presentation and viva preparation
+
+- `docs/PROJECT_PRESENTATION.md` — a 10-slide academic presentation with slide content and speaker notes aligned to the actual repository.
+- `docs/VIVA_QUESTIONS.md` — viva preparation with technical answers covering architecture, security, calculations, OCR limitations, and project-specific implementation details.
+- `docs/PROJECT_DEMO_SCRIPT.md` — a concise, reliable 5-minute demonstration script focused on the working core workflow.
+
+### Submission recommendation
+
+The current project is ready for demonstration and academic submission within the limits of its implemented functionality, provided the evaluator runs it with a local MongoDB instance and the required environment variables. The project should be presented using the currently verified workflow and should not claim unsupported advanced features.
