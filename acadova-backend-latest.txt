@@ -1,0 +1,1117 @@
+
+
+========== FILE: backend/services/documents/parseTimetable.js ==========
+
+const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+const DAY_ALIASES = new Map([
+  ['monday', 0], ['mon', 0], ['tuesday', 1], ['tue', 1], ['tues', 1],
+  ['wednesday', 2], ['wed', 2], ['thursday', 3], ['thu', 3], ['thur', 3], ['thurs', 3],
+  ['friday', 4], ['fri', 4], ['saturday', 5], ['sat', 5], ['sunday', 6], ['sun', 6],
+]);
+
+function parseCsv(text, delimiter) {
+  const rows = []; let row = []; let value = ''; let quoted = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === '"' && quoted && text[i + 1] === '"') { value += '"'; i += 1; }
+    else if (char === '"') quoted = !quoted;
+    else if (char === delimiter && !quoted) { row.push(value.trim()); value = ''; }
+    else if ((char === '\n' || char === '\r') && !quoted) {
+      if (char === '\r' && text[i + 1] === '\n') i += 1;
+      row.push(value.trim()); if (row.some(Boolean)) rows.push(row); row = []; value = '';
+    } else value += char;
+  }
+  row.push(value.trim()); if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+
+function weekday(value) {
+  // Tesseract often reads compact timetable labels as M0N, TUE., or
+  // separates letters with whitespace. Normalize only common visual OCR
+  // confusions, then require a complete known alias (never just a prefix).
+  const key = String(value || '').trim().toLowerCase()
+    .replace(/0/g, 'o').replace(/[1|!l]/g, 'i').replace(/5/g, 's')
+    .replace(/[^a-z]/g, '');
+  return DAY_ALIASES.get(key) ?? null;
+}
+
+function hasWeekdayText(text) {
+  const tokens = String(text || '').match(/[a-z0-9|!]+/gi) || [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (weekday(tokens[index]) !== null) return true;
+    let combined = '';
+    for (let offset = index; offset < Math.min(tokens.length, index + 7); offset += 1) {
+      if (tokens[offset].length > 2) break;
+      combined += tokens[offset];
+      if (weekday(combined) !== null && offset > index) return true;
+    }
+  }
+  return false;
+}
+
+function normalizeTime(value) {
+  const match = String(value || '').trim().replace('.', ':').match(/^(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?$/i);
+  if (!match) return null;
+  let hour = Number(match[1]); const minute = Number(match[2] || 0); const meridiem = match[3]?.toLowerCase();
+  if (meridiem) {
+    if (hour < 1 || hour > 12) return null;
+    if (hour === 12) hour = 0;
+    if (meridiem === 'pm') hour += 12;
+  } else if (hour > 23) return null;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function rowResult({ subjectName = '', subjectCode = '', day, start, end, location = '', teacher = '', sessionType = '', section = '' }, sourceLine) {
+  const normalizedDay = Number.isInteger(day) ? day : weekday(day);
+  const startTime = normalizeTime(start); const endTime = normalizeTime(end);
+  const issues = [];
+  if (!subjectName.trim()) issues.push('Subject is missing.');
+  if (normalizedDay === null) issues.push('Weekday is unclear.');
+  if (!startTime || !endTime || startTime >= endTime) issues.push('Start/end time is missing or invalid.');
+  return {
+    subjectName: subjectName.trim(), subjectCode: subjectCode.trim(), weekday: normalizedDay,
+    startTime, endTime, location: location.trim(), teacher: teacher.trim(), sessionType: sessionType.trim(), section: section.trim(), sourceLine, issues,
+  };
+}
+
+const HEADER_MAP = {
+  subjectName: ['subject', 'course', 'class name', 'subject name'],
+  subjectCode: ['code', 'subject code', 'course code'],
+  day: ['day', 'weekday', 'week day'],
+  start: ['start', 'start time', 'from'],
+  end: ['end', 'end time', 'to', 'until'],
+  location: ['room', 'location', 'classroom', 'venue'],
+  teacher: ['faculty', 'teacher', 'instructor', 'lecturer'],
+};
+
+function parseDelimited(text) {
+  const delimiter = text.split(/\r?\n/, 1)[0].includes('\t') ? '\t' : ',';
+  const table = parseCsv(text, delimiter);
+  if (!table.length) return [];
+  const header = table[0].map((value) => value.toLowerCase().replace(/[_-]/g, ' ').trim());
+  const positions = Object.fromEntries(Object.entries(HEADER_MAP).map(([field, aliases]) => [field, header.findIndex((item) => aliases.includes(item))]));
+  const hasHeader = Object.values(positions).some((index) => index >= 0);
+  const rows = hasHeader ? table.slice(1) : table;
+  const defaults = { day: 0, start: 1, end: 2, subjectName: 3, subjectCode: 4, location: 5 };
+  return rows.map((columns, index) => {
+    const get = (field) => columns[positions[field] >= 0 && hasHeader ? positions[field] : defaults[field]] || '';
+    return rowResult({ subjectName: get('subjectName'), subjectCode: get('subjectCode'), day: get('day'), start: get('start'), end: get('end'), location: get('location'), teacher: get('teacher') }, index + (hasHeader ? 2 : 1));
+  });
+}
+
+function parseTextLines(text) {
+  const output = []; let currentDay = null;
+  const timeRange = /\b(\d{1,2}(?::[0-5]\d)?\s*(?:am|pm)?)\s*(?:-|–|—|to)\s*(\d{1,2}(?::[0-5]\d)?\s*(?:am|pm)?)\b/i;
+  text.split(/\r?\n/).forEach((line, index) => {
+    const dayMatch = line.match(/\b(Mon(?:day)?|Tues?(?:day)?|Wed(?:nesday)?|Thurs?(?:day)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)\b/i);
+    const dayText = dayMatch?.[0] || (line.match(/[a-z0-9|!]+/gi) || []).find((token) => weekday(token) !== null) || '';
+    if (!timeRange.test(line)) {
+      if (dayText && line.trim().split(/\s+/).length <= 3) currentDay = dayText;
+      return;
+    }
+    const range = line.match(timeRange); const day = dayText || currentDay;
+    const before = line.slice(0, range.index).trim();
+    let remainder = `${before} ${line.slice(range.index + range[0].length)}`.replace(/[|,;\t]/g, ' ').trim();
+    if (dayText) remainder = remainder.replace(dayText, '').trim();
+    remainder = remainder.replace(/^[:\-–—\s]+|[:\-–—\s]+$/g, '');
+    if (!day && !remainder) return;
+    const tokens = remainder.split(/\s{2,}|\s\|\s/).filter(Boolean);
+    const subjectCode = remainder.match(/\b[A-Z]{2,}[A-Z0-9-]*\d[A-Z0-9-]*\b/)?.[0] || '';
+    let location = '';
+    const room = remainder.match(/\b(?:room|rm|lab|classroom)\s*[:#-]?\s*[A-Z0-9-]+/i);
+    if (room) location = room[0];
+    else if (tokens.length > 1) location = tokens[tokens.length - 1];
+    let subjectName = remainder;
+    if (subjectCode) subjectName = subjectName.replace(subjectCode, '').trim();
+    if (location && subjectName.endsWith(location)) subjectName = subjectName.slice(0, -location.length).trim();
+    output.push(rowResult({ subjectName: subjectName.replace(/^[|,;\s]+|[|,;\s]+$/g, ''), subjectCode, day, start: range[1], end: range[2], location }, index + 1));
+  });
+  return output;
+}
+
+function positionedClock(word) {
+  const text = String(word.text || '');
+  const match = text.match(/^[-\u2010-\u2015\u2212]?\s*(\d{1,2})[:.](\d{2})\s*(am|pm)?$/i)
+    || text.match(/^(am|pm)\s*(\d{1,2})[:.](\d{2})$/i);
+  if (!match) return null;
+  const prefixed = /^(?:am|pm)/i.test(text);
+  return {
+    hour: prefixed ? match[2] : match[1],
+    minute: prefixed ? match[3] : match[2],
+    meridiem: (prefixed ? match[1] : match[3])?.toLowerCase() || '',
+    word,
+  };
+}
+
+function positionedTimeHeaders(lines, dayRows = []) {
+  const headers = [];
+  for (const line of lines) {
+    const words = [...line.words].sort((a, b) => a.bbox.x0 - b.bbox.x0);
+    const clocks = words.map((word, index) => ({ ...positionedClock(word), index })).filter((clock) => clock.word);
+    for (let index = 0; index < clocks.length - 1; index += 1) {
+      const start = clocks[index]; const end = clocks[index + 1];
+      const between = words.slice(start.index + 1, end.index);
+      const hasSeparator = between.some((word) => /^(?:-|[\u2010-\u2015\u2212]|to)$/i.test(String(word.text || '').trim())) || /^[-\u2010-\u2015\u2212]/.test(String(end.word.text || '').trim());
+      if (!hasSeparator) continue;
+      const distance = Math.abs((end.word.bbox.x0 + end.word.bbox.x1 - start.word.bbox.x0 - start.word.bbox.x1) / 2);
+      const containsUnparsedDigits = between.some((word) => /\d/.test(String(word.text || '')) && !/^(?:\d{1,2}[:.]\d{2})$/i.test(String(word.text || '').trim()));
+      if (distance > 200 || containsUnparsedDigits) continue;
+      const attachMeridiem = (clock) => {
+        if (clock.meridiem) return clock.meridiem;
+        const x = (clock.word.bbox.x0 + clock.word.bbox.x1) / 2;
+        const adjacent = words.filter((word) => /^(?:am|pm)$/i.test(String(word.text || '').trim()))
+          .map((word) => ({ word, distance: Math.abs((word.bbox.x0 + word.bbox.x1) / 2 - x) }))
+          .filter((item) => item.distance <= Math.max(72, (clock.word.bbox.y1 - clock.word.bbox.y0) * 2.5))
+          .sort((a, b) => a.distance - b.distance)[0];
+        return adjacent?.word.text.toLowerCase() || '';
+      };
+      const startSuffix = attachMeridiem(start); const endSuffix = attachMeridiem(end);
+      const startTime = `${start.hour}:${start.minute}${startSuffix ? ` ${startSuffix}` : ''}`;
+      const endTime = `${end.hour}:${end.minute}${endSuffix ? ` ${endSuffix}` : ''}`;
+      const x = (((start.word.bbox.x0 + start.word.bbox.x1) / 2) + ((end.word.bbox.x0 + end.word.bbox.x1) / 2)) / 2;
+      headers.push({ x, left: start.word.bbox.x0, right: end.word.bbox.x1, start: startTime, end: endTime });
+    }
+  }
+  const clocks = lines.flatMap((line, lineIndex) => line.words.map((word) => {
+    const clock = positionedClock(word);
+    return clock && {
+      ...clock,
+      lineIndex,
+      x: (word.bbox.x0 + word.bbox.x1) / 2,
+      y: (word.bbox.y0 + word.bbox.y1) / 2,
+      height: word.bbox.y1 - word.bbox.y0,
+    };
+  }).filter(Boolean));
+  const firstDayY = dayRows.length ? Math.min(...dayRows.map((item) => item.y)) : Infinity;
+  const headerClocks = clocks.filter((clock) => clock.y < firstDayY);
+  for (const start of headerClocks) {
+    const end = headerClocks
+      .filter((clock) => clock.y > start.y && Math.abs(clock.x - start.x) <= Math.max(24, Math.min(clock.height, start.height) * 1.5))
+      .sort((left, right) => left.y - right.y)[0];
+    if (!end || end.y - start.y > Math.max(72, Math.max(start.height, end.height) * 4)) continue;
+    const suffix = (clock) => {
+      if (clock.meridiem) return clock.meridiem;
+      const adjacent = lines.flatMap((line) => line.words)
+        .filter((word) => /^(?:am|pm)$/i.test(String(word.text || '').trim()))
+        .map((word) => ({
+          word,
+          distance: Math.hypot(
+            (word.bbox.x0 + word.bbox.x1) / 2 - clock.x,
+            (word.bbox.y0 + word.bbox.y1) / 2 - clock.y
+          ),
+        }))
+        .filter((item) => item.distance <= Math.max(24, clock.height * 1.5))
+        .sort((left, right) => left.distance - right.distance)[0];
+      return adjacent?.word.text.toLowerCase() || '';
+    };
+    const startTime = normalizeTime(`${start.hour}:${start.minute}${suffix(start) ? ` ${suffix(start)}` : ''}`);
+    const endTime = normalizeTime(`${end.hour}:${end.minute}${suffix(end) ? ` ${suffix(end)}` : ''}`);
+    if (!startTime || !endTime || startTime >= endTime) continue;
+    const x = (start.x + end.x) / 2;
+    if (headers.some((header) => Math.abs(header.x - x) < 18)) continue;
+    headers.push({ x, left: Math.min(start.word.bbox.x0, end.word.bbox.x0), right: Math.max(start.word.bbox.x1, end.word.bbox.x1), start: startTime, end: endTime });
+  }
+  return headers;
+}
+
+function extractFacultyDetails(lines) {
+  const headerIndex = lines.findIndex((line) => {
+    const words = line.words.map((word) => String(word.text || '').toLowerCase());
+    return words.some((word) => /^(faculty|instructor|lecturer|teacher)$/i.test(word))
+      && words.some((word) => /^code$/i.test(word))
+      && words.some((word) => /^subject$/i.test(word));
+  });
+  if (headerIndex < 0) return new Map();
+  const header = lines[headerIndex];
+  const centerX = (word) => (word.bbox.x0 + word.bbox.x1) / 2;
+  const codeHeader = header.words.find((word) => /^code$/i.test(word.text));
+  const subjectHeader = header.words.find((word) => /^subject$/i.test(word.text));
+  const facultyHeader = header.words.find((word) => /^(faculty|instructor|lecturer|teacher)$/i.test(word.text));
+  const codeX = centerX(codeHeader);
+  const subjectX = centerX(subjectHeader);
+  const facultyX = centerX(facultyHeader);
+  const facultyBoundary = subjectX + (facultyX - subjectX) * 0.68;
+  const details = new Map();
+  for (const line of lines.slice(headerIndex + 1)) {
+    const words = [...line.words].sort((a, b) => a.bbox.x0 - b.bbox.x0);
+    const code = words.find((word) => centerX(word) < subjectX - 20 && centerX(word) >= codeX - 30 && /^[A-Z][A-Z0-9-]{1,14}$/i.test(word.text));
+    if (!code) continue;
+    const subjectName = words
+      .filter((word) => centerX(word) >= subjectX - 20 && centerX(word) < facultyBoundary)
+      .map((word) => word.text)
+      .join(' ')
+      .trim();
+    const teacher = words
+      .filter((word) => centerX(word) >= facultyBoundary)
+      .map((word) => word.text)
+      .join(' ')
+      .trim();
+    if (subjectName && teacher) details.set(code.text.toLowerCase(), { code: code.text, subjectName, teacher });
+  }
+  return details;
+}
+
+function parsePositionedWords(words) {
+  const ordered = [...words].sort((a, b) => (a.bbox.y0 + a.bbox.y1) / 2 - (b.bbox.y0 + b.bbox.y1) / 2 || a.bbox.x0 - b.bbox.x0);
+  const lines = [];
+  for (const word of ordered) {
+    const midY = (word.bbox.y0 + word.bbox.y1) / 2;
+    let line = lines.find((candidate) => Math.abs(candidate.midY - midY) <= Math.max(10, (word.bbox.y1 - word.bbox.y0) * 0.55));
+    if (!line) { line = { midY, words: [] }; lines.push(line); }
+    line.words.push(word);
+    line.midY = line.words.reduce((sum, item) => sum + (item.bbox.y0 + item.bbox.y1) / 2, 0) / line.words.length;
+  }
+  lines.sort((a, b) => a.midY - b.midY);
+  const dayRows = lines.flatMap((line, index) => {
+    line.words.sort((a, b) => a.bbox.x0 - b.bbox.x0);
+    const anchors = line.words.flatMap((dayWord, wordIndex) => {
+      const directDay = weekday(dayWord.text);
+      if (directDay !== null) return [{ day: directDay, dayWord }];
+      const fragments = [];
+      let candidate = '';
+      let end = wordIndex - 1;
+      for (let offset = wordIndex; offset < Math.min(line.words.length, wordIndex + 7); offset += 1) {
+        const current = line.words[offset];
+        const fragment = String(current.text || '').replace(/[^a-z0-9]/gi, '');
+        if (!fragment || fragment.length > 2 || (end >= wordIndex && current.bbox.x0 - line.words[end].bbox.x1 > Math.max(16, (current.bbox.y1 - current.bbox.y0) * 1.25))) break;
+        fragments.push(current);
+        candidate += fragment;
+        end = offset;
+        const day = weekday(candidate);
+        if (day !== null && fragments.length >= 2) {
+          const joinedWord = {
+            text: candidate,
+            confidence: fragments.reduce((sum, item) => sum + (Number(item.confidence) || 0), 0) / fragments.length,
+            bbox: { x0: fragments[0].bbox.x0, y0: Math.min(...fragments.map((item) => item.bbox.y0)), x1: fragments.at(-1).bbox.x1, y1: Math.max(...fragments.map((item) => item.bbox.y1)) },
+            parts: fragments,
+          };
+          return [{ day, dayWord: joinedWord }];
+        }
+      }
+      return [];
+    });
+    return anchors.map(({ day, dayWord }) => ({ line, index, day, dayWord, y: (dayWord.bbox.y0 + dayWord.bbox.y1) / 2 }));
+  }).sort((a, b) => a.y - b.y);
+  if (!dayRows.length) return [];
+  const weekdayWords = new Set(dayRows.flatMap(({ dayWord }) => [dayWord, ...(dayWord.parts || [])]));
+  const timePattern = /^(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|-\d{1,2}(?::\d{2})?\s*(?:am|pm)?)$/i;
+  const clusters = (line, gapFactor = 1.8) => {
+    const result = [];
+    for (const word of line.words) {
+      const last = result[result.length - 1];
+      const height = Math.max(10, word.bbox.y1 - word.bbox.y0);
+      if (!last || word.bbox.x0 - last.right > Math.max(18, height * gapFactor)) result.push({ words: [word], left: word.bbox.x0, right: word.bbox.x1 });
+      else { last.words.push(word); last.right = word.bbox.x1; }
+    }
+    return result.map((group) => ({ ...group, x: (group.left + group.right) / 2, text: group.words.map((word) => word.text).join(' ') }));
+  };
+  const rangePattern = /(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:[-\u2010-\u2015\u2212]|to)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i;
+  // OCR commonly splits a header such as "09:00 - 10:00" into separate
+  // words or even separate lines. Keep the word coordinates and look for a
+  // time range within a visual column instead of requiring one OCR line.
+  const headers = positionedTimeHeaders(lines, dayRows);
+  for (const line of lines) {
+    const groups = clusters(line, 2.4);
+    for (let start = 0; start < groups.length; start += 1) {
+      for (let size = 1; size <= 5 && start + size <= groups.length; size += 1) {
+        const group = groups.slice(start, start + size);
+        const joined = group.map((part) => part.text).join(' ');
+        const range = joined.match(rangePattern);
+        if (range && !headers.length) headers.push({ x: (group[0].left + group[group.length - 1].right) / 2, left: group[0].left, right: group[group.length - 1].right, start: range[1], end: range[2] });
+      }
+    }
+  }
+  const uniqueHeaders = headers.filter((header, index) => !headers.slice(0, index).some((item) => Math.abs(item.x - header.x) < 18 && item.start === header.start && item.end === header.end));
+  const dayGaps = dayRows.slice(1).map((item, index) => item.y - dayRows[index].y).filter((gap) => gap > 0).sort((a, b) => a - b);
+  const rowGap = dayGaps.length ? dayGaps[Math.floor((dayGaps.length - 1) / 2)] : 48;
+  const halfBand = Math.max(12, Math.min(100, (rowGap || 48) / 2));
+  const rows = [];
+  const breakPeriods = [];
+  for (let dayIndex = 0; dayIndex < dayRows.length; dayIndex += 1) {
+    const item = dayRows[dayIndex];
+    // The weekday label and the subject baselines often differ enough that
+    // Tesseract puts them on separate lines. Collect all words in the visual
+    // day band; its edges are halfway to adjacent weekday anchors.
+    const upper = dayIndex === 0 ? item.y - halfBand : Math.max((dayRows[dayIndex - 1].y + item.y) / 2, item.y - halfBand);
+    const lower = dayIndex === dayRows.length - 1 ? item.y + halfBand : Math.min((item.y + dayRows[dayIndex + 1].y) / 2, item.y + halfBand);
+    const cells = ordered.filter((word) => {
+      const y = (word.bbox.y0 + word.bbox.y1) / 2;
+      return y >= upper && y <= lower && !weekdayWords.has(word) && weekday(word.text) === null && !timePattern.test(word.text);
+    });
+    if (!cells.length) continue;
+    const cellLine = { words: cells.sort((a, b) => a.bbox.x0 - b.bbox.x0) };
+    clusters(cellLine, 1.25).forEach((group) => {
+      const text = group.text.replace(/[|:;,]+$/g, '').trim();
+      let range = text.match(rangePattern);
+      if (!range && uniqueHeaders.length) {
+        const orderedHeaders = [...uniqueHeaders].sort((a, b) => a.x - b.x);
+        const headerIndex = orderedHeaders.reduce((best, header, index) => Math.abs(header.x - group.x) < Math.abs(orderedHeaders[best].x - group.x) ? index : best, 0);
+        const header = orderedHeaders[headerIndex];
+        const distances = orderedHeaders.map((candidate) => Math.abs(candidate.x - group.x)).sort((a, b) => a - b);
+        const leftBound = headerIndex === 0 ? header.x - Math.max(90, (orderedHeaders[1]?.x - header.x || 180) / 2) : (orderedHeaders[headerIndex - 1].x + header.x) / 2;
+        const rightBound = headerIndex === orderedHeaders.length - 1 ? header.x + Math.max(90, (header.x - orderedHeaders[headerIndex - 1]?.x || 180) / 2) : (header.x + orderedHeaders[headerIndex + 1].x) / 2;
+        const neighborGaps = [orderedHeaders[headerIndex - 1] && header.x - orderedHeaders[headerIndex - 1].x, orderedHeaders[headerIndex + 1] && orderedHeaders[headerIndex + 1].x - header.x].filter(Boolean);
+        const maxColumnOffset = Math.min(140, Math.max(60, (Math.min(...neighborGaps, 180) * 0.45)));
+        if (group.x >= leftBound && group.x <= rightBound
+          && distances[0] <= maxColumnOffset
+          && (distances.length < 2 || distances[1] - distances[0] >= 30)) range = header;
+      }
+      let name = text.replace(/\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*(?:[-\u2010-\u2015\u2212]|to)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?/ig, '').trim();
+      if (!name || /^[-\u2010-\u2015\u2212|/]+$/.test(name) || /^(day|subject|faculty|teacher|instructor|semester|section|batch)$/i.test(name)) return;
+      const isBreakPeriod = /^(break|lunch|recess|free)(?:\s+(?:break|period|time))?$/i.test(name);
+      const locationMatch = name.match(/\b(?:room|rm|lab|classroom)\s*[:#-]?\s*[A-Z0-9-]+/i);
+      const location = locationMatch?.[0] || '';
+      if (location) name = name.replace(locationMatch[0], '').trim();
+      const sessionType = /\blab(?:oratory)?\b/i.test(name) ? 'lab' : /\bpractical\b/i.test(name) ? 'practical' : /\btutorial\b/i.test(name) ? 'tutorial' : '';
+      const code = name.match(/\b[A-Z]{2,}[A-Z0-9-]*\d[A-Z0-9-]*\b/)?.[0] || '';
+      const sectionLine = lines.slice(0, item.index + 1).reverse().find((candidate) => /\b(section|batch|group|semester|year)\s*[:#-]?\s*[A-Z0-9-]+/i.test(candidate.words.map((word) => word.text).join(' ')));
+      const section = sectionLine?.words.map((word) => word.text).join(' ').trim() || '';
+      let subjectName = code ? name.replace(code, '').trim() || code : name;
+      if (sessionType) {
+        const withoutSessionType = subjectName.replace(/\b(lab(?:oratory)?|practical|tutorial)\b/ig, '').replace(/\s{2,}/g, ' ').trim();
+        if (withoutSessionType) subjectName = withoutSessionType;
+      }
+      const row = rowResult({ subjectName: isBreakPeriod ? name : subjectName, subjectCode: code, day: item.day, start: range?.start || range?.[1], end: range?.end || range?.[2], location, sessionType, section }, item.index + 1);
+      if (isBreakPeriod) row.isBreakPeriod = true;
+      const confidenceWords = [...group.words, item.dayWord].filter((word) => Number.isFinite(word.confidence));
+      if (confidenceWords.length) {
+        row.confidence = Math.round(confidenceWords.reduce((sum, word) => sum + word.confidence, 0) / confidenceWords.length);
+        if (row.confidence < 55) row.issues.push('OCR confidence is low. Verify this row against the image.');
+      }
+      if (isBreakPeriod) breakPeriods.push(row);
+      else rows.push(row);
+    });
+  }
+  const facultyDetails = extractFacultyDetails(lines);
+  for (const row of rows) {
+    const detail = facultyDetails.get((row.subjectCode || row.subjectName).toLowerCase());
+    if (!detail) continue;
+    row.subjectCode = detail.code;
+    if (row.subjectName.toLowerCase() === detail.code.toLowerCase()) row.subjectName = detail.subjectName;
+    row.teacher = detail.teacher;
+  }
+  return [...rows, ...breakPeriods];
+}
+
+function parseTimetable(text, sourceType, words = []) {
+  if (words.length) {
+    const positioned = parsePositionedWords(words);
+    if (positioned.length) return positioned.map((row, index) => ({ ...row, sourceLine: row.sourceLine || index + 1 }));
+  }
+  const delimited = sourceType === 'text/csv' || sourceType === 'text/tab-separated-values' || /,|\t/.test(text.split(/\r?\n/, 1)[0]);
+  const rows = delimited ? parseDelimited(text) : parseTextLines(text);
+  if (!rows.length) {
+    const hasDay = words.some((word) => weekday(word.text) !== null) || hasWeekdayText(text);
+    const message = sourceType.startsWith('image/')
+      ? (hasDay
+        ? 'Weekdays were detected, but the timetable rows and period times could not be associated. Try a clearer, upright photo, or start a manual preview to enter the classes you can read.'
+        : 'Image text was detected, but no timetable weekdays or class rows were recognized. Try a clearer photo focused on the timetable grid, or start a manual preview.')
+      : 'No timetable rows were recognized. Use a CSV with subject, day, startTime, and endTime columns, or try a clearer text-based timetable.';
+    throw Object.assign(new Error(message), { statusCode: 422 });
+  }
+  return rows.map((row, index) => ({ ...row, sourceLine: row.sourceLine || index + 1 }));
+}
+
+module.exports = { parseTimetable, normalizeTime, parsePositionedWords };
+
+
+
+========== FILE: backend/controllers/importController.js ==========
+
+const asyncHandler = require('../utils/asyncHandler');
+const AppError = require('../utils/AppError');
+const { extractText, validateContent } = require('../services/documents/extractText');
+const { parseTimetable } = require('../services/documents/parseTimetable');
+const { parseExams, parseSyllabus, parseCalendar } = require('../services/documents/parseAcademicDocs');
+
+function uploadedFileName(req) {
+  const encoded = String(req.headers['x-file-name'] || '').slice(0, 512);
+  try { return decodeURIComponent(encoded).split(/[\\/]/).pop(); }
+  catch { throw new AppError(400, 'The uploaded filename is invalid. Rename the file and try again.'); }
+}
+
+function previewResult(rows, method, message, dimensions = {}) {
+  return {
+    extraction: {
+      method,
+      rows: rows.length,
+      incomplete: rows.filter((row) => row.issues.length).length,
+      ...dimensions,
+    },
+    message,
+    rows,
+  };
+}
+
+async function buildTimetablePreview(buffer, declaredType, fileName, dependencies = {}) {
+  const validate = dependencies.validateContent || validateContent;
+  const extractLocal = dependencies.extractText || extractText;
+  const parseLocal = dependencies.parseTimetable || parseTimetable;
+  validate(buffer, declaredType, fileName);
+  const extracted = await extractLocal(buffer, declaredType, fileName, { timetableOcr: true });
+  const rows = parseLocal(extracted.text, extracted.sourceType, extracted.words);
+  return previewResult(
+    rows,
+    extracted.method,
+    rows.some((row) => row.issues.length)
+      ? `${rows.filter((row) => row.issues.length).length} row(s) need correction before they can be saved.`
+      : 'Review and correct the extracted timetable before confirming to save.',
+    extracted.dimensions || {}
+  );
+}
+
+async function processPreview(req, res, parser, kind) {
+  if (!Buffer.isBuffer(req.body)) throw new AppError(400, `Upload a ${kind} document to preview it.`);
+  const declaredType = (req.headers['content-type'] || '').split(';')[0].toLowerCase();
+  let extracted; let result;
+  try { extracted = await extractText(req.body, declaredType, uploadedFileName(req)); result = parser(extracted.text, extracted.sourceType); }
+  catch (error) { if (Number.isInteger(error.statusCode)) throw new AppError(error.statusCode, error.message); throw error; }
+  res.json({ success: true, extraction: { method: extracted.method, rows: Array.isArray(result) ? result.length : result.topics.length }, message: 'Review and correct the extracted information before confirming.', ...(Array.isArray(result) ? { rows: result } : result) });
+}
+
+exports.previewTimetable = asyncHandler(async (req, res) => {
+  if (!Buffer.isBuffer(req.body)) throw new AppError(400, 'Upload a timetable file to preview it.');
+  const declaredType = (req.headers['content-type'] || '').split(';')[0].toLowerCase();
+  const fileName = uploadedFileName(req);
+  try {
+    res.json({ success: true, ...(await buildTimetablePreview(req.body, declaredType, fileName)) });
+  } catch (error) {
+    if (Number.isInteger(error.statusCode)) throw new AppError(error.statusCode, error.message);
+    throw error;
+  }
+});
+
+exports.previewExams = asyncHandler((req, res) => processPreview(req, res, parseExams, 'exam schedule'));
+exports.previewSyllabus = asyncHandler((req, res) => processPreview(req, res, parseSyllabus, 'syllabus'));
+exports.previewCalendar = asyncHandler((req, res) => processPreview(req, res, parseCalendar, 'academic calendar'));
+exports.buildTimetablePreview = buildTimetablePreview;
+
+
+
+========== FILE: backend/routes/importRoutes.js ==========
+
+const express = require('express');
+const { protect } = require('../middleware/auth');
+const { previewTimetable, previewExams, previewSyllabus, previewCalendar } = require('../controllers/importController');
+
+const router = express.Router();
+router.use(protect);
+router.post('/timetable/preview', express.raw({
+  type: ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'text/plain', 'text/csv', 'text/tab-separated-values', 'application/octet-stream'],
+  limit: '12mb',
+}), previewTimetable);
+const rawDocument = express.raw({ type: ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'text/plain', 'text/csv', 'text/tab-separated-values', 'application/octet-stream'], limit: '12mb' });
+router.post('/exams/preview', rawDocument, previewExams);
+router.post('/syllabus/preview', rawDocument, previewSyllabus);
+router.post('/calendar/preview', rawDocument, previewCalendar);
+
+module.exports = router;
+
+
+
+========== FILE: backend/controllers/academicController.js ==========
+
+const mongoose = require('mongoose');
+const asyncHandler = require('../utils/asyncHandler');
+const AppError = require('../utils/AppError');
+const { Subject, TimetableEntry, CalendarEvent, Exam, SyllabusTopic } = require('../models/Academic');
+const Attendance = require('../models/Attendance');
+const { StudySession } = require('../models/StudyPlanner');
+const ClassIntention = require('../models/ClassIntention');
+
+const definitions = {
+  subjects: { model: Subject, populate: '' },
+  timetable: { model: TimetableEntry, populate: 'subject' },
+  calendar: { model: CalendarEvent, populate: '' },
+  exams: { model: Exam, populate: 'subject', sort: { date: 1, startTime: 1 } },
+  syllabus: { model: SyllabusTopic, populate: 'subject' },
+};
+
+function cleanPayload(resource, body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'Request body must be an object.');
+  const fields = {
+    subjects: ['name', 'code', 'teacher', 'credits', 'description'],
+    timetable: ['subject', 'weekday', 'startTime', 'endTime', 'location', 'teacher', 'sessionType'],
+    calendar: ['title', 'type', 'date', 'endDate', 'description'],
+    exams: ['title', 'type', 'subject', 'date', 'startTime', 'endTime', 'venue', 'notes'],
+    syllabus: ['subject', 'unit', 'topic', 'completed', 'progress'],
+  }[resource];
+  if (!fields) throw new AppError(404, 'Academic resource not found.');
+  const payload = {};
+  fields.forEach((field) => { if (body[field] !== undefined) payload[field] = body[field]; });
+  if (resource === 'syllabus') {
+    if (payload.progress !== undefined && !['not-started', 'in-progress', 'completed'].includes(payload.progress)) {
+      throw new AppError(400, 'Choose Not Started, In Progress, or Completed topic progress.');
+    }
+    if (payload.progress !== undefined) payload.completed = payload.progress === 'completed';
+    else if (payload.completed !== undefined) payload.progress = payload.completed ? 'completed' : 'not-started';
+  }
+  for (const key of ['subject']) {
+    if (payload[key] !== undefined && !mongoose.isValidObjectId(payload[key])) throw new AppError(400, `Invalid ${key} identifier.`, { [key]: `Invalid ${key} identifier.` });
+  }
+  return payload;
+}
+
+async function assertSubjectOwner(subjectId, userId) {
+  if (subjectId && !(await Subject.exists({ _id: subjectId, user: userId }))) {
+    throw new AppError(400, 'Choose one of your own subjects.', { subject: 'Subject not found in your account.' });
+  }
+}
+
+function escapedRegex(value) { return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+async function assertNoDuplicate(resource, values, userId, excludedId) {
+  let identity;
+  if (resource === 'timetable') {
+    if (!values.subject || values.weekday == null || !values.startTime || !values.endTime) return;
+    identity = { subject: values.subject, weekday: values.weekday, startTime: values.startTime, endTime: values.endTime };
+  } else if (resource === 'calendar') {
+    if (!values.title || !values.date || Number.isNaN(new Date(values.date).getTime())) return;
+    identity = { title: new RegExp(`^${escapedRegex(values.title)}$`, 'i'), date: values.date };
+  } else if (resource === 'exams') {
+    if (!values.subject || !values.title || !values.date || Number.isNaN(new Date(values.date).getTime())) return;
+    identity = { subject: values.subject, title: new RegExp(`^${escapedRegex(values.title)}$`, 'i'), date: values.date, startTime: values.startTime || '' };
+  } else if (resource === 'syllabus') {
+    if (!values.subject || !values.unit || !values.topic) return;
+    identity = { subject: values.subject, unit: values.unit, topic: values.topic };
+  }
+  else return;
+  if (Object.values(identity).some((value) => value === undefined)) return;
+  const query = { ...identity, user: userId };
+  if (excludedId) query._id = { $ne: excludedId };
+  if (await definitions[resource].model.exists(query)) throw new AppError(409, `A matching ${resource === 'timetable' ? 'class' : resource === 'calendar' ? 'calendar event' : resource === 'exams' ? 'exam' : 'syllabus topic'} already exists.`);
+}
+
+function controller(resource) {
+  const { model, populate, sort = { createdAt: -1 } } = definitions[resource];
+  return {
+    list: asyncHandler(async (req, res) => {
+      const query = model.find({ user: req.user.id }).sort(sort);
+      if (populate) query.populate(populate, 'name code');
+      const records = await query;
+      res.json({ success: true, records });
+    }),
+    create: asyncHandler(async (req, res) => {
+      const values = cleanPayload(resource, req.body);
+      await assertSubjectOwner(values.subject, req.user.id);
+      await assertNoDuplicate(resource, values, req.user.id);
+      const record = await model.create({ ...values, user: req.user.id });
+      if (populate) await record.populate(populate);
+      res.status(201).json({ success: true, record });
+    }),
+    update: asyncHandler(async (req, res) => {
+      const values = cleanPayload(resource, req.body);
+      await assertSubjectOwner(values.subject, req.user.id);
+      const record = await model.findOne({ _id: req.params.id, user: req.user.id });
+      if (!record) throw new AppError(404, 'Record not found.');
+      await assertNoDuplicate(resource, { ...record.toObject(), ...values }, req.user.id, record._id);
+      Object.assign(record, values);
+      await record.save();
+      if (populate) await record.populate(populate);
+      res.json({ success: true, record });
+    }),
+    remove: asyncHandler(async (req, res) => {
+      const record = await model.findOneAndDelete({ _id: req.params.id, user: req.user.id });
+      if (!record) throw new AppError(404, 'Record not found.');
+      if (resource === 'subjects') {
+        const entries = await TimetableEntry.find({ user: req.user.id, subject: record.id }).select('_id');
+        await Promise.all([
+          TimetableEntry.deleteMany({ user: req.user.id, subject: record.id }),
+          Exam.deleteMany({ user: req.user.id, subject: record.id }),
+          SyllabusTopic.deleteMany({ user: req.user.id, subject: record.id }),
+          Attendance.deleteMany({ user: req.user.id, subject: record.id }),
+          ClassIntention.deleteMany({ user: req.user.id, timetableEntry: { $in: entries.map((entry) => entry._id) } }),
+          StudySession.deleteMany({ user: req.user.id, subject: record.id }),
+        ]);
+      }
+      if (resource === 'timetable') {
+        await Promise.all([
+          Attendance.updateMany({ user: req.user.id, timetableEntry: record.id }, { $set: { timetableEntry: null } }),
+          ClassIntention.deleteMany({ user: req.user.id, timetableEntry: record.id }),
+        ]);
+      }
+      if (resource === 'exams') await StudySession.deleteMany({ user: req.user.id, exam: record.id });
+      if (resource === 'syllabus') await StudySession.deleteMany({ user: req.user.id, topic: record.id, status: 'planned' });
+      res.json({ success: true });
+    }),
+  };
+}
+
+module.exports = { controller };
+
+
+
+========== FILE: backend/models/Academic.js ==========
+
+const mongoose = require('mongoose');
+
+const ownership = { user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true } };
+
+const subjectSchema = new mongoose.Schema({
+  ...ownership,
+  name: { type: String, required: true, trim: true, maxlength: 100 },
+  code: { type: String, required: true, trim: true, maxlength: 30 },
+  teacher: { type: String, trim: true, maxlength: 100, default: '' },
+  credits: { type: Number, required: true, min: 0, max: 60 },
+  description: { type: String, trim: true, maxlength: 2000, default: '' },
+}, { timestamps: true });
+subjectSchema.index({ user: 1, code: 1 }, { unique: true });
+
+const timetableSchema = new mongoose.Schema({
+  ...ownership,
+  subject: { type: mongoose.Schema.Types.ObjectId, ref: 'Subject', required: true },
+  weekday: { type: Number, required: true, min: 0, max: 6 },
+  startTime: { type: String, required: true, match: /^([01]\d|2[0-3]):[0-5]\d$/ },
+  endTime: { type: String, required: true, match: /^([01]\d|2[0-3]):[0-5]\d$/ },
+  location: { type: String, trim: true, maxlength: 120, default: '' },
+  teacher: { type: String, trim: true, maxlength: 100, default: '' },
+  sessionType: { type: String, enum: ['', 'lecture', 'lab', 'practical', 'tutorial', 'other'], default: '' },
+}, { timestamps: true });
+timetableSchema.pre('validate', function validateRange() {
+  if (this.startTime && this.endTime && this.startTime >= this.endTime) this.invalidate('endTime', 'End time must be after start time.');
+});
+
+const calendarSchema = new mongoose.Schema({
+  ...ownership,
+  title: { type: String, required: true, trim: true, maxlength: 160 },
+  type: { type: String, required: true, enum: ['event', 'holiday', 'deadline', 'college'] },
+  date: { type: Date, required: true },
+  endDate: { type: Date, default: null },
+  description: { type: String, trim: true, maxlength: 2000, default: '' },
+}, { timestamps: true });
+calendarSchema.pre('validate', function validateRange() {
+  if (this.endDate && this.date && this.endDate < this.date) this.invalidate('endDate', 'End date must be on or after the start date.');
+});
+
+const examSchema = new mongoose.Schema({
+  ...ownership,
+  title: { type: String, required: true, trim: true, maxlength: 160 },
+  type: { type: String, required: true, enum: ['midterm', 'final', 'quiz', 'practical', 'other'] },
+  subject: { type: mongoose.Schema.Types.ObjectId, ref: 'Subject', required: true },
+  date: { type: Date, required: true },
+  startTime: { type: String, default: '', match: /^$|^([01]\d|2[0-3]):[0-5]\d$/ },
+  endTime: { type: String, default: '', match: /^$|^([01]\d|2[0-3]):[0-5]\d$/ },
+  venue: { type: String, trim: true, maxlength: 160, default: '' },
+  notes: { type: String, trim: true, maxlength: 2000, default: '' },
+}, { timestamps: true });
+examSchema.index({ user: 1, date: 1, startTime: 1 });
+examSchema.pre('validate', function validateRange() {
+  if (Boolean(this.startTime) !== Boolean(this.endTime)) this.invalidate('endTime', 'Enter both exam times or leave both blank.');
+  if (this.startTime && this.endTime && this.startTime >= this.endTime) this.invalidate('endTime', 'End time must be after start time.');
+});
+
+const syllabusSchema = new mongoose.Schema({
+  ...ownership,
+  subject: { type: mongoose.Schema.Types.ObjectId, ref: 'Subject', required: true },
+  unit: { type: String, required: true, trim: true, maxlength: 120 },
+  topic: { type: String, required: true, trim: true, maxlength: 200 },
+  completed: { type: Boolean, default: false },
+  progress: { type: String, enum: ['not-started', 'in-progress', 'completed'], default: 'not-started' },
+}, { timestamps: true });
+syllabusSchema.index({ user: 1, subject: 1, unit: 1, topic: 1 }, { unique: true });
+
+module.exports = {
+  Subject: mongoose.model('Subject', subjectSchema),
+  TimetableEntry: mongoose.model('TimetableEntry', timetableSchema),
+  CalendarEvent: mongoose.model('CalendarEvent', calendarSchema),
+  Exam: mongoose.model('Exam', examSchema),
+  SyllabusTopic: mongoose.model('SyllabusTopic', syllabusSchema),
+};
+
+
+
+========== FILE: backend/test/documentImport.test.js ==========
+
+const test = require('node:test');
+const { after } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const sharp = require('sharp');
+const { parseTimetable, normalizeTime } = require('../services/documents/parseTimetable');
+const {
+  validateContent, MAX_BYTES, imageDimensions, scoreOcrResult, selectBestOcrResult, preprocessImageCandidates,
+} = require('../services/documents/extractText');
+const { parseExams, parseSyllabus, parseCalendar, dateValue } = require('../services/documents/parseAcademicDocs');
+const { extractText, shutdownOcrWorker } = require('../services/documents/extractText');
+
+after(shutdownOcrWorker);
+
+function extractionMetrics(expected, actual) {
+  const count = (predicate) => expected.reduce((total, row, index) => total + Number(predicate(row, actual[index])), 0);
+  return {
+    weekdayDetection: count((expectedRow, actualRow) => actualRow?.weekday === expectedRow.weekday),
+    subjectExtraction: count((expectedRow, actualRow) => actualRow?.subjectName === expectedRow.subjectName),
+    timeExtraction: count((expectedRow, actualRow) => actualRow?.startTime === expectedRow.startTime && actualRow?.endTime === expectedRow.endTime),
+    subjectToTimeSlotMapping: count((expectedRow, actualRow) => actualRow?.weekday === expectedRow.weekday
+      && actualRow?.subjectName === expectedRow.subjectName
+      && actualRow?.startTime === expectedRow.startTime
+      && actualRow?.endTime === expectedRow.endTime),
+  };
+}
+
+function assertExtractionMetrics(expected, actual, counts) {
+  assert.deepEqual(extractionMetrics(expected, actual), counts);
+  assert.equal(actual.length, expected.length, 'all visible class cells should remain reviewable');
+}
+
+function makeTextPdf(text) {
+  const escaped = text.replace(/([\\()])/g, '\\$1');
+  const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`;
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+  ];
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  objects.forEach((object, index) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${index + 1} 0 obj\n${object}\nendobj\n`; });
+  const xref = Buffer.byteLength(pdf);
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return Buffer.from(pdf, 'ascii');
+}
+
+test('parses CSV timetable rows, faculty names, and normalizes weekdays and 12-hour times', () => {
+  const rows = parseTimetable('subject,code,day,start,end,location,faculty\nAlgorithms,CS101,Monday,9:00 AM,10:15 AM,Room 4,Dr Rao', 'text/csv');
+  assert.equal(rows.length, 1);
+  assert.deepEqual({ subject: rows[0].subjectName, code: rows[0].subjectCode, day: rows[0].weekday, start: rows[0].startTime, end: rows[0].endTime, location: rows[0].location }, {
+    subject: 'Algorithms', code: 'CS101', day: 0, start: '09:00', end: '10:15', location: 'Room 4',
+  });
+  assert.equal(rows[0].teacher, 'Dr Rao');
+  assert.deepEqual(rows[0].issues, []);
+});
+
+test('parses text timetable lines and flags incomplete values for review', () => {
+  const rows = parseTimetable('Monday\n09:00 - 10:00 CS101 Data Structures Room 4\nWednesday 25:00 - 26:00 Invalid Time', 'text/plain');
+  assert.equal(rows[0].subjectName, 'Data Structures');
+  assert.equal(rows[0].weekday, 0);
+  assert.ok(rows[1].issues.includes('Start/end time is missing or invalid.'));
+});
+
+test('uses OCR word positions to map weekday rows to matching time columns', () => {
+  const word = (text, x0, y0, x1, y1) => ({ text, bbox: { x0, y0, x1, y1 }, confidence: 95 });
+  const words = [
+    word('Monday', 10, 100, 70, 120), word('Algorithms', 150, 100, 240, 120),
+    word('Tuesday', 10, 150, 70, 170), word('Databases', 150, 150, 240, 170),
+    word('9:00', 130, 50, 160, 70), word('-', 162, 50, 170, 70), word('10:00', 172, 50, 210, 70),
+  ];
+  const rows = parseTimetable('Monday Algorithms\nTuesday Databases', 'image/jpeg', words);
+  assert.deepEqual(rows.map((row) => [row.weekday, row.subjectName, row.startTime, row.endTime]), [
+    [0, 'Algorithms', '09:00', '10:00'], [1, 'Databases', '09:00', '10:00'],
+  ]);
+});
+
+test('maps subjects when OCR separates the weekday and subject baselines and preserves stacked sections', () => {
+  const word = (text, x0, y0, x1, y1) => ({ text, bbox: { x0, y0, x1, y1 }, confidence: 91 });
+  const words = [
+    word('Semester', 20, 12, 80, 24), word('1', 84, 12, 90, 24),
+    word('09:00', 190, 35, 225, 47), word('-', 230, 35, 235, 47), word('10:00', 240, 35, 278, 47),
+    word('Monday,', 10, 70, 78, 84), word('Algorithms', 190, 83, 264, 96),
+    word('Tuesday', 10, 120, 76, 134), word('Physics', 190, 133, 244, 146),
+    word('Faculty', 500, 190, 548, 202), word('Semester', 20, 212, 80, 224), word('2', 84, 212, 90, 224),
+    word('09:00', 190, 235, 225, 247), word('-', 230, 235, 235, 247), word('10:00', 240, 235, 278, 247),
+    word('Monday', 10, 270, 72, 284), word('Databases', 190, 283, 264, 296),
+  ];
+  const rows = parseTimetable('Semester 1\n09:00 - 10:00\nMonday\nAlgorithms\nTuesday\nPhysics\nSemester 2\n09:00 - 10:00\nMonday\nDatabases', 'image/jpeg', words);
+  assert.deepEqual(rows.map((row) => [row.section, row.weekday, row.subjectName, row.startTime, row.endTime]), [
+    ['Semester 1', 0, 'Algorithms', '09:00', '10:00'],
+    ['Semester 1', 1, 'Physics', '09:00', '10:00'],
+    ['Semester 2', 0, 'Databases', '09:00', '10:00'],
+  ]);
+});
+
+test('recognizes punctuated short weekdays and common OCR weekday character confusions', () => {
+  const rows = parseTimetable([
+    'subject,day,start,end',
+    'Algorithms,MON.,9:00 AM,10:00 AM',
+    'Databases,Tues,10:00 AM,11:00 AM',
+    'Networks,Thurs.,11:00 AM,12:00 PM',
+    'Systems,M0N,1:00 PM,2:00 PM',
+  ].join('\n'), 'text/csv');
+  assert.deepEqual(rows.map((row) => row.weekday), [0, 1, 3, 0]);
+});
+
+test('joins OCR-split weekday letters and reads meridiem time headings from positioned words', () => {
+  const word = (text, x0, y0, x1, y1) => ({ text, bbox: { x0, y0, x1, y1 }, confidence: 88 });
+  const words = [
+    word('9:00', 180, 20, 211, 34), word('AM', 214, 20, 232, 34), word('–', 235, 20, 241, 34), word('10:00', 244, 20, 280, 34), word('AM', 283, 20, 301, 34),
+    word('M', 12, 60, 21, 75), word('o', 23, 60, 32, 75), word('n', 34, 60, 43, 75), word('Algorithms', 185, 73, 265, 88),
+    word('TUE.', 12, 110, 46, 125), word('Databases', 185, 123, 265, 138),
+  ];
+  const rows = parseTimetable('9:00 AM – 10:00 AM\nM o n Algorithms\nTUE. Databases', 'image/jpeg', words);
+  assert.deepEqual(rows.map((row) => [row.weekday, row.subjectName, row.startTime, row.endTime]), [
+    [0, 'Algorithms', '09:00', '10:00'], [1, 'Databases', '09:00', '10:00'],
+  ]);
+});
+
+test('pairs vertically stacked time endpoints by coordinate without assuming a fixed layout', () => {
+  const word = (text, x0, y0, x1, y1) => ({ text, bbox: { x0, y0, x1, y1 }, confidence: 92 });
+  const words = [
+    word('09:00', 160, 20, 200, 34), word('10:00', 160, 40, 200, 54),
+    word('10:00', 300, 20, 340, 34), word('11:00', 300, 40, 340, 54),
+    word('Monday', 10, 90, 72, 104), word('Algorithms', 155, 90, 250, 104),
+    word('Tuesday', 10, 140, 72, 154), word('Databases', 295, 140, 380, 154),
+  ];
+  const rows = parseTimetable('09:00\\n10:00\\n10:00\\n11:00\\nMonday Algorithms\\nTuesday Databases', 'image/jpeg', words);
+  assert.deepEqual(rows.map((row) => [row.weekday, row.subjectName, row.startTime, row.endTime]), [
+    [0, 'Algorithms', '09:00', '10:00'],
+    [1, 'Databases', '10:00', '11:00'],
+  ]);
+});
+
+test('does not guess a time when a class cell falls ambiguously between period columns', () => {
+  const word = (text, x0, y0, x1, y1) => ({ text, bbox: { x0, y0, x1, y1 }, confidence: 90 });
+  const words = [
+    word('09:00', 150, 20, 185, 34), word('-', 188, 20, 194, 34), word('10:00', 197, 20, 235, 34),
+    word('10:00', 250, 20, 285, 34), word('-', 288, 20, 294, 34), word('11:00', 297, 20, 335, 34),
+    word('Monday', 10, 80, 72, 94), word('Unclear', 222, 80, 278, 94),
+  ];
+  const [row] = parseTimetable('09:00 - 10:00 10:00 - 11:00\\nMonday Unclear', 'image/jpeg', words);
+  assert.equal(row.subjectName, 'Unclear');
+  assert.equal(row.startTime, null);
+  assert.equal(row.endTime, null);
+  assert.ok(row.issues.includes('Start/end time is missing or invalid.'));
+});
+
+test('does not import break periods as classes and retains their detected weekday and time', () => {
+  const word = (text, x0, y0, x1, y1) => ({ text, bbox: { x0, y0, x1, y1 }, confidence: 90 });
+  const words = [
+    word('09:00', 150, 20, 185, 34), word('-', 188, 20, 194, 34), word('10:00', 197, 20, 235, 34),
+    word('Monday', 10, 80, 72, 94), word('Lunch', 155, 80, 198, 94), word('Break', 202, 80, 245, 94),
+  ];
+  const rows = parseTimetable('09:00 - 10:00\\nMonday Lunch Break', 'image/jpeg', words);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].isBreakPeriod, true);
+  assert.deepEqual([rows[0].subjectName, rows[0].weekday, rows[0].startTime, rows[0].endTime], ['Lunch Break', 0, '09:00', '10:00']);
+});
+
+test('keeps recognizable day and subject cells reviewable when the image has no readable period headings', () => {
+  const word = (text, x0, y0, x1, y1) => ({ text, bbox: { x0, y0, x1, y1 }, confidence: 90 });
+  const rows = parseTimetable('Monday Algorithms', 'image/jpeg', [word('Monday', 10, 50, 70, 64), word('Algorithms', 150, 63, 230, 76)]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].subjectName, 'Algorithms');
+  assert.equal(rows[0].weekday, 0);
+  assert.ok(rows[0].issues.includes('Start/end time is missing or invalid.'));
+});
+
+test('distinguishes image text that lacks recognizable timetable structure', () => {
+  assert.throws(() => parseTimetable('Faculty directory and course list', 'image/jpeg'), /Image text was detected, but no timetable weekdays/);
+});
+
+test('reads image dimensions and rejects an image extension that conflicts with bytes', () => {
+  const png = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png);
+  png.writeUInt32BE(640, 16); png.writeUInt32BE(480, 20);
+  assert.deepEqual(imageDimensions(png, 'image/png'), { width: 640, height: 480 });
+  assert.throws(() => validateContent(png, 'image/png'), /filename/i);
+  assert.throws(() => validateContent(png, 'image/png', 'timetable.jpg'), /extension does not match/i);
+});
+
+test('preprocesses timetable images into bounded enhanced and thresholded candidates without mutating input', async () => {
+  const image = fs.readFileSync(path.join(__dirname, 'timetable-sample.jpg'));
+  const original = Buffer.from(image);
+  const candidates = await preprocessImageCandidates(image);
+  assert.ok(candidates.enhanced.length > 0);
+  assert.ok(candidates.thresholded.length > 0);
+  assert.deepEqual(image, original);
+  const { width, height } = await sharp(candidates.enhanced).metadata();
+  assert.ok(width <= 3600 && height <= 3600);
+  assert.ok(width * height <= 12_000_000);
+  assert.ok(candidates.scaleX <= 2 && candidates.scaleY <= 2);
+});
+
+test('auto-orients images using their EXIF orientation during preprocessing', async () => {
+  const image = fs.readFileSync(path.join(__dirname, 'timetable-sample.jpg'));
+  const rotated = await sharp(image).withMetadata({ orientation: 6 }).jpeg().toBuffer();
+  const candidates = await preprocessImageCandidates(rotated);
+  const { width, height } = await sharp(candidates.enhanced).metadata();
+  assert.ok(height > width, 'the EXIF-rotated image is corrected to portrait orientation');
+});
+
+test('selects one internally consistent OCR result using words, weekday, time, and confidence signals', () => {
+  const weak = {
+    text: 'college notices course departments',
+    words: ['college', 'notices', 'course', 'departments'].map((text) => ({ text, confidence: 90 })),
+  };
+  const strong = {
+    text: 'Tuesdoy 09:00 - 10:00',
+    words: [
+      { text: 'Tuesdoy', confidence: 85 },
+      { text: 'Algorithms', confidence: 92 },
+      { text: '09:00', confidence: 95 },
+    ],
+  };
+  assert.ok(scoreOcrResult(strong).score > scoreOcrResult(weak).score);
+  const selected = selectBestOcrResult([
+    { ...weak, quality: scoreOcrResult(weak), image: 'original' },
+    { ...strong, quality: scoreOcrResult(strong), image: 'enhanced' },
+  ]);
+  assert.equal(selected.image, 'enhanced');
+  assert.equal(selected.text, strong.text);
+  assert.deepEqual(selected.words, strong.words);
+});
+
+test('runs bundled local OCR on an actual JPEG timetable and maps its columns', async () => {
+  const imagePath = path.join(__dirname, 'timetable-sample.jpg');
+  const extracted = await extractText(fs.readFileSync(imagePath), 'image/jpeg', 'timetable-sample.jpg', { timetableOcr: true });
+  assert.equal(extracted.method, 'tesseract.js-local-ocr');
+  assert.match(extracted.text, /Monday/i);
+  assert.ok(extracted.words.length > 5);
+  const rows = parseTimetable(extracted.text, extracted.sourceType, extracted.words);
+  assert.deepEqual(rows.map((row) => [row.weekday, row.subjectName, row.startTime, row.endTime]), [
+    [0, 'Mathematics', '09:00', '10:00'], [0, 'Physics', '10:15', '11:15'],
+    [1, 'Programming', '09:00', '10:00'], [1, 'Tutorial', '10:15', '11:15'],
+  ]);
+  const expected = [
+    { weekday: 0, subjectName: 'Mathematics', startTime: '09:00', endTime: '10:00' },
+    { weekday: 0, subjectName: 'Physics', startTime: '10:15', endTime: '11:15' },
+    { weekday: 1, subjectName: 'Programming', startTime: '09:00', endTime: '10:00' },
+    { weekday: 1, subjectName: 'Tutorial', startTime: '10:15', endTime: '11:15' },
+  ];
+  assertExtractionMetrics(expected, rows, {
+    weekdayDetection: 4, subjectExtraction: 4, timeExtraction: 4, subjectToTimeSlotMapping: 4,
+  });
+  assert.equal(rows[1].sessionType, 'lab');
+  assert.equal(rows[3].sessionType, 'tutorial');
+});
+
+test('runs local OCR on an abbreviated timetable with a separate faculty table', async () => {
+  const file = 'timetable-abbreviated-sample.jpg';
+  const extracted = await extractText(fs.readFileSync(path.join(__dirname, file)), 'image/jpeg', file, { timetableOcr: true });
+  const rows = parseTimetable(extracted.text, extracted.sourceType, extracted.words);
+  assert.ok(rows.length >= 20, `expected timetable cells, got ${rows.length}`);
+  assert.deepEqual([...new Set(rows.map((row) => row.weekday))].sort(), [0, 1, 2, 3, 4]);
+  assert.ok(rows.some((row) => row.weekday === 0 && row.subjectCode === 'CS101' && row.startTime === '09:00'));
+  assert.ok(rows.some((row) => row.subjectName === 'Data Structures' && row.teacher === 'Dr Rao'));
+  assert.ok(rows.some((row) => row.subjectName === 'Applied Mathematics' && row.teacher === 'Prof Shah'));
+  assert.ok(rows.some((row) => row.subjectName === 'Physics' && row.teacher === 'Dr Ali'));
+  assert.ok(rows.some((row) => row.issues.includes('Start/end time is missing or invalid.')), 'ambiguous OCR headings stay reviewable');
+  assert.ok(rows.every((row) => !/faculty|dr rao|prof shah/i.test(row.subjectName)), 'the lower faculty table is not imported as a class');
+  assert.ok(rows.every((row) => row.subjectName !== '-'), 'empty cells are not emitted as subjects');
+  const times = [
+    ['09:00', '10:00'], ['10:00', '11:00'], ['11:15', '12:15'], ['13:00', '14:00'], ['14:00', '15:00'],
+  ];
+  const subjects = [
+    ['CS101', 'DBMS Lab', '', 'MATH', 'ENG'],
+    ['MATH', 'PHY', 'CS101', 'Tutorial', ''],
+    ['ENG', 'CS101', 'Lab', 'MATH', 'PHY'],
+    ['PHY', 'Tutorial', 'DBMS', '', 'MATH'],
+    ['CS101', 'MATH', 'PHY Lab', 'ENG', 'Tutorial'],
+  ];
+  const canonical = { CS101: 'Data Structures', MATH: 'Applied Mathematics', PHY: 'Physics' };
+  const expected = subjects.flatMap((daySubjects, weekday) => daySubjects.flatMap((value, period) => {
+    if (!value) return [];
+    const subjectName = canonical[value] || canonical[value.split(' ')[0]] || value.replace(/\s+Lab$/, '');
+    return [{ weekday, subjectName, startTime: times[period][0], endTime: times[period][1] }];
+  }));
+  assertExtractionMetrics(expected, rows, {
+    weekdayDetection: 22, subjectExtraction: 22, timeExtraction: 18, subjectToTimeSlotMapping: 18,
+  });
+});
+
+test('measures OCR accuracy on low-contrast and low-resolution timetable photos', async () => {
+  const source = fs.readFileSync(path.join(__dirname, 'timetable-sample.jpg'));
+  const expected = [
+    { weekday: 0, subjectName: 'Mathematics', startTime: '09:00', endTime: '10:00' },
+    { weekday: 0, subjectName: 'Physics', startTime: '10:15', endTime: '11:15' },
+    { weekday: 1, subjectName: 'Programming', startTime: '09:00', endTime: '10:00' },
+    { weekday: 1, subjectName: 'Tutorial', startTime: '10:15', endTime: '11:15' },
+  ];
+  const lowContrast = await sharp(source).linear(0.65, 55).jpeg({ quality: 50 }).toBuffer();
+  const extracted = await extractText(lowContrast, 'image/jpeg', 'low-contrast.jpg', { timetableOcr: true });
+  const rows = parseTimetable(extracted.text, extracted.sourceType, extracted.words);
+  assertExtractionMetrics(expected, rows, {
+    weekdayDetection: 4, subjectExtraction: 4, timeExtraction: 4, subjectToTimeSlotMapping: 4,
+  });
+
+  const lowResolution = await sharp(source).resize(600, 450).jpeg({ quality: 38 }).toBuffer();
+  const degraded = await extractText(lowResolution, 'image/jpeg', 'low-resolution.jpg', { timetableOcr: true });
+  assert.throws(() => parseTimetable(degraded.text, degraded.sourceType, degraded.words), /no timetable weekdays or class rows/i);
+});
+
+test('extracts calendar events, exams, and syllabus topics from JPEG uploads', async () => {
+  const readImage = async (file) => extractText(fs.readFileSync(path.join(__dirname, file)), 'image/jpeg', file);
+  const calendar = parseCalendar((await readImage('calendar-sample.jpg')).text);
+  assert.deepEqual(calendar.map((event) => [event.title, event.date, event.type]), [
+    ['Founders Day', '2026-09-05', 'event'],
+    ['Winter Break', '2026-12-24', 'holiday'],
+    ['Project submission deadline', '2026-10-15', 'deadline'],
+  ]);
+  const exams = parseExams((await readImage('exam-sample.jpg')).text);
+  assert.deepEqual(exams.map((exam) => [exam.subjectName, exam.date, exam.startTime, exam.endTime, exam.venue]), [
+    ['Algorithms', '2026-11-12', '09:00', '11:00', 'Hall A'],
+    ['Physics', '2026-11-18', '13:00', '15:00', 'Room 4'],
+  ]);
+  const syllabus = parseSyllabus((await readImage('syllabus-sample.jpg')).text);
+  assert.equal(syllabus.subjectName, 'Algorithms');
+  assert.deepEqual(syllabus.topics.map((topic) => topic.topic), ['Complexity analysis', 'Asymptotic notation', 'Traversal']);
+});
+
+test('returns an actionable unreadable-image error for a blank JPEG', async () => {
+  await assert.rejects(() => extractText(fs.readFileSync(path.join(__dirname, 'blank-image.jpg')), 'image/jpeg', 'blank-image.jpg'), /No readable text/i);
+});
+
+test('decodes a valid WebP upload with the local OCR pipeline', async () => {
+  const webp = Buffer.from('UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEAAUAmJaQAA3AA/v89WAAAAA==', 'base64');
+  await assert.rejects(() => extractText(webp, 'image/webp', 'pixel.webp'), /No readable text/i);
+});
+
+test('keeps searchable PDF extraction working through pdftotext', async (context) => {
+  const command = process.env.PDFTOTEXT_PATH || 'pdftotext';
+  if (spawnSync(command, ['-v'], { windowsHide: true }).error) return context.skip('Poppler pdftotext is not installed in this environment.');
+  const extracted = await extractText(makeTextPdf('Algorithms Monday 09:00 10:00'), 'application/pdf', 'schedule.pdf');
+  assert.equal(extracted.method, 'pdf-text');
+  assert.match(extracted.text, /Algorithms Monday 09:00 10:00/);
+});
+
+test('normalizes 24-hour and meridiem clock values', () => {
+  assert.equal(normalizeTime('12:30 AM'), '00:30');
+  assert.equal(normalizeTime('12 PM'), '12:00');
+  assert.equal(normalizeTime('24:00'), null);
+});
+
+test('rejects empty, oversized, binary text, and mismatched declared file content', () => {
+  assert.throws(() => validateContent(Buffer.alloc(0), 'text/csv'), /non-empty/);
+  assert.throws(() => validateContent(Buffer.alloc(MAX_BYTES + 1, 65), 'text/plain'), /12 MB/);
+  assert.throws(() => validateContent(Buffer.from([0, 1, 2]), 'text/plain'), /CSV or plain text/);
+  const pdf = Buffer.from('%PDF-1.4 sample');
+  assert.throws(() => validateContent(pdf, 'image/png'), /does not match/);
+});
+
+test('rejects a non-timetable text document with a reviewable extraction error', () => {
+  assert.throws(() => parseTimetable('This file has no rows or class times.', 'text/plain'), /No timetable rows were recognized/);
+});
+
+test('parses multiple exam rows and leaves unrecognized subjects for user resolution', () => {
+  const rows = parseExams('subject,code,date,start,end,venue,exam\nCalculus,MATH101,2026-11-02,09:00,11:00,Hall A,Midterm\nPhysics,PHY102,2026-11-05,,,Room 2,Final', 'text/csv');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].date, '2026-11-02');
+  assert.equal(rows[0].type, 'midterm');
+  assert.equal(rows[1].startTime, '');
+  assert.equal(dateValue('31/02/2026'), '');
+});
+
+test('parses syllabus units and topics without fabricating content', () => {
+  const result = parseSyllabus('Subject: Algorithms\nCode: CS201\nUnit 1: Foundations\n- Complexity analysis\n- Asymptotic notation\nUnit 2: Graphs\n- Traversal');
+  assert.equal(result.subjectName, 'Algorithms');
+  assert.equal(result.units.length, 2);
+  assert.deepEqual(result.topics.map((item) => item.topic), ['Complexity analysis', 'Asymptotic notation', 'Traversal']);
+});
+
+test('parses calendar events, holidays, ranges, deadlines, and day-first month names', () => {
+  const rows = parseCalendar('event,date,end date,type,description\nWinter Break,2026-12-24,2027-01-02,holiday,No classes\nProject deadline,02/11/2026,,deadline,Submit report');
+  assert.deepEqual(rows.map((row) => [row.title, row.type, row.date, row.endDate]), [
+    ['Winter Break', 'holiday', '2026-12-24', '2027-01-02'],
+    ['Project deadline', 'deadline', '2026-11-02', ''],
+  ]);
+  const textRows = parseCalendar('Founders Day 5 September 2026');
+  assert.equal(textRows[0].title, 'Founders Day');
+  assert.equal(textRows[0].date, '2026-09-05');
+  assert.equal(dateValue('31 February 2026'), '');
+  const invalidRange = parseCalendar('event,date,end date\nSpring break,2026-03-01,31/02/2026')[0];
+  assert.ok(invalidRange.issues.includes('Event end date is unclear or invalid.'));
+});
+

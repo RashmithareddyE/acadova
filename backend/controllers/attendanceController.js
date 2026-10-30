@@ -7,6 +7,7 @@ const AppError = require('../utils/AppError');
 const asyncHandler = require('../utils/asyncHandler');
 const { attendanceInsight, projectAttendance, summarizeStatuses } = require('../services/attendanceCalculator');
 const { buildTodayDashboard } = require('../services/todayDashboard');
+const { applicationDateString } = require('../utils/applicationDate');
 
 const STATUSES = ['present', 'absent', 'cancelled'];
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
@@ -47,13 +48,13 @@ async function ownedReferences({ subjectId, timetableId, userId, date }) {
   }
 }
 
-function payload(body) {
+function payload(body, now = new Date()) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'Request body must be an object.');
   const { subject, timetableEntry, date, status, notes = '' } = body;
   if (!subject) throw new AppError(400, 'Subject is required.', { subject: 'Subject is required.' });
   if (!validDate(date)) throw new AppError(400, 'Enter a valid class date (YYYY-MM-DD).', { date: 'Enter a valid date.' });
   if (!STATUSES.includes(status)) throw new AppError(400, 'Choose Present, Absent, or Cancelled.', { status: 'Choose a valid attendance status.' });
-  const today = new Date().toISOString().slice(0, 10);
+  const today = applicationDateString(now);
   if (date > today && status !== 'cancelled') throw new AppError(400, 'Future classes are projections, not completed attendance. Only a known cancellation can be recorded ahead of time.', { status: 'Future planned absences are not saved as actual attendance.' });
   if (typeof notes !== 'string' || notes.length > 1000) throw new AppError(400, 'Notes must be 1000 characters or fewer.', { notes: 'Notes must be 1000 characters or fewer.' });
   return { subject, timetableEntry: timetableEntry || null, date, status, notes: notes.trim() };
@@ -139,7 +140,7 @@ exports.getSummaries = asyncHandler(async (req, res) => {
 });
 
 exports.getTodayDashboard = asyncHandler(async (req, res) => {
-  const date = req.query.date || new Date().toISOString().slice(0, 10);
+  const date = req.query.date || applicationDateString();
   if (!validDate(date)) throw new AppError(400, 'Enter a valid dashboard date (YYYY-MM-DD).');
   const { start, end } = dateBounds(date);
   const userId = req.user.id;
@@ -186,7 +187,7 @@ exports.setIntention = asyncHandler(async (req, res) => {
   const { timetableEntry, date, intention } = req.body;
   objectId(timetableEntry, 'timetableEntry');
   if (!validDate(date)) throw new AppError(400, 'Enter a valid class date (YYYY-MM-DD).');
-  if (date < new Date().toISOString().slice(0, 10)) throw new AppError(400, 'Plans can only be recorded for today or a future class.');
+  if (date < applicationDateString()) throw new AppError(400, 'Plans can only be recorded for today or a future class.');
   if (!['attend', 'miss'].includes(intention)) throw new AppError(400, 'Choose whether you plan to attend or miss this class.');
   const entry = await TimetableEntry.findOne({ _id: timetableEntry, user: req.user.id });
   if (!entry) throw new AppError(404, 'Scheduled class not found in your timetable.');
@@ -249,3 +250,5 @@ exports.project = asyncHandler(async (req, res) => {
   const actual = summarizeStatuses(records.map((record) => record.status), targetUser.attendanceTarget || 75);
   res.json({ success: true, projection: projectAttendance(actual.attended, actual.missed, attend, miss, targetUser.attendanceTarget || 75) });
 });
+
+exports._validation = { validDate, weekdayFor, dateBounds, payload };

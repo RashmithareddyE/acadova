@@ -19,6 +19,7 @@ const timetableSchema = new mongoose.Schema({
   startTime: { type: String, required: true, match: /^([01]\d|2[0-3]):[0-5]\d$/ },
   endTime: { type: String, required: true, match: /^([01]\d|2[0-3]):[0-5]\d$/ },
   location: { type: String, trim: true, maxlength: 120, default: '' },
+  teacher: { type: String, trim: true, maxlength: 100, default: '' },
   sessionType: { type: String, enum: ['', 'lecture', 'lab', 'practical', 'tutorial', 'other'], default: '' },
 }, { timestamps: true });
 timetableSchema.pre('validate', function validateRange() {

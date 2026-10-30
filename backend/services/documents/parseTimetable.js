@@ -57,7 +57,7 @@ function normalizeTime(value) {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
-function rowResult({ subjectName = '', subjectCode = '', day, start, end, location = '', sessionType = '', section = '' }, sourceLine) {
+function rowResult({ subjectName = '', subjectCode = '', day, start, end, location = '', teacher = '', sessionType = '', section = '' }, sourceLine) {
   const normalizedDay = Number.isInteger(day) ? day : weekday(day);
   const startTime = normalizeTime(start); const endTime = normalizeTime(end);
   const issues = [];
@@ -66,7 +66,7 @@ function rowResult({ subjectName = '', subjectCode = '', day, start, end, locati
   if (!startTime || !endTime || startTime >= endTime) issues.push('Start/end time is missing or invalid.');
   return {
     subjectName: subjectName.trim(), subjectCode: subjectCode.trim(), weekday: normalizedDay,
-    startTime, endTime, location: location.trim(), sessionType: sessionType.trim(), section: section.trim(), sourceLine, issues,
+    startTime, endTime, location: location.trim(), teacher: teacher.trim(), sessionType: sessionType.trim(), section: section.trim(), sourceLine, issues,
   };
 }
 
@@ -77,6 +77,7 @@ const HEADER_MAP = {
   start: ['start', 'start time', 'from'],
   end: ['end', 'end time', 'to', 'until'],
   location: ['room', 'location', 'classroom', 'venue'],
+  teacher: ['faculty', 'teacher', 'instructor', 'lecturer'],
 };
 
 function parseDelimited(text) {
@@ -90,7 +91,7 @@ function parseDelimited(text) {
   const defaults = { day: 0, start: 1, end: 2, subjectName: 3, subjectCode: 4, location: 5 };
   return rows.map((columns, index) => {
     const get = (field) => columns[positions[field] >= 0 && hasHeader ? positions[field] : defaults[field]] || '';
-    return rowResult({ subjectName: get('subjectName'), subjectCode: get('subjectCode'), day: get('day'), start: get('start'), end: get('end'), location: get('location') }, index + (hasHeader ? 2 : 1));
+    return rowResult({ subjectName: get('subjectName'), subjectCode: get('subjectCode'), day: get('day'), start: get('start'), end: get('end'), location: get('location'), teacher: get('teacher') }, index + (hasHeader ? 2 : 1));
   });
 }
 
@@ -109,6 +110,7 @@ function parseTextLines(text) {
     let remainder = `${before} ${line.slice(range.index + range[0].length)}`.replace(/[|,;\t]/g, ' ').trim();
     if (dayText) remainder = remainder.replace(dayText, '').trim();
     remainder = remainder.replace(/^[:\-–—\s]+|[:\-–—\s]+$/g, '');
+    if (!day && !remainder) return;
     const tokens = remainder.split(/\s{2,}|\s\|\s/).filter(Boolean);
     const subjectCode = remainder.match(/\b[A-Z]{2,}[A-Z0-9-]*\d[A-Z0-9-]*\b/)?.[0] || '';
     let location = '';
@@ -124,11 +126,20 @@ function parseTextLines(text) {
 }
 
 function positionedClock(word) {
-  const match = String(word.text || '').match(/^[-\u2010-\u2015\u2212]?\s*(\d{1,2})[:.](\d{2})\s*(am|pm)?$/i);
-  return match ? { hour: match[1], minute: match[2], meridiem: match[3]?.toLowerCase() || '', word } : null;
+  const text = String(word.text || '');
+  const match = text.match(/^[-\u2010-\u2015\u2212]?\s*(\d{1,2})[:.](\d{2})\s*(am|pm)?$/i)
+    || text.match(/^(am|pm)\s*(\d{1,2})[:.](\d{2})$/i);
+  if (!match) return null;
+  const prefixed = /^(?:am|pm)/i.test(text);
+  return {
+    hour: prefixed ? match[2] : match[1],
+    minute: prefixed ? match[3] : match[2],
+    meridiem: (prefixed ? match[1] : match[3])?.toLowerCase() || '',
+    word,
+  };
 }
 
-function positionedTimeHeaders(lines) {
+function positionedTimeHeaders(lines, dayRows = []) {
   const headers = [];
   for (const line of lines) {
     const words = [...line.words].sort((a, b) => a.bbox.x0 - b.bbox.x0);
@@ -157,7 +168,83 @@ function positionedTimeHeaders(lines) {
       headers.push({ x, left: start.word.bbox.x0, right: end.word.bbox.x1, start: startTime, end: endTime });
     }
   }
+  const clocks = lines.flatMap((line, lineIndex) => line.words.map((word) => {
+    const clock = positionedClock(word);
+    return clock && {
+      ...clock,
+      lineIndex,
+      x: (word.bbox.x0 + word.bbox.x1) / 2,
+      y: (word.bbox.y0 + word.bbox.y1) / 2,
+      height: word.bbox.y1 - word.bbox.y0,
+    };
+  }).filter(Boolean));
+  const firstDayY = dayRows.length ? Math.min(...dayRows.map((item) => item.y)) : Infinity;
+  const headerClocks = clocks.filter((clock) => clock.y < firstDayY);
+  for (const start of headerClocks) {
+    const end = headerClocks
+      .filter((clock) => clock.y > start.y && Math.abs(clock.x - start.x) <= Math.max(24, Math.min(clock.height, start.height) * 1.5))
+      .sort((left, right) => left.y - right.y)[0];
+    if (!end || end.y - start.y > Math.max(72, Math.max(start.height, end.height) * 4)) continue;
+    const suffix = (clock) => {
+      if (clock.meridiem) return clock.meridiem;
+      const adjacent = lines.flatMap((line) => line.words)
+        .filter((word) => /^(?:am|pm)$/i.test(String(word.text || '').trim()))
+        .map((word) => ({
+          word,
+          distance: Math.hypot(
+            (word.bbox.x0 + word.bbox.x1) / 2 - clock.x,
+            (word.bbox.y0 + word.bbox.y1) / 2 - clock.y
+          ),
+        }))
+        .filter((item) => item.distance <= Math.max(24, clock.height * 1.5))
+        .sort((left, right) => left.distance - right.distance)[0];
+      return adjacent?.word.text.toLowerCase() || '';
+    };
+    const startTime = normalizeTime(`${start.hour}:${start.minute}${suffix(start) ? ` ${suffix(start)}` : ''}`);
+    const endTime = normalizeTime(`${end.hour}:${end.minute}${suffix(end) ? ` ${suffix(end)}` : ''}`);
+    if (!startTime || !endTime || startTime >= endTime) continue;
+    const x = (start.x + end.x) / 2;
+    if (headers.some((header) => Math.abs(header.x - x) < 18)) continue;
+    headers.push({ x, left: Math.min(start.word.bbox.x0, end.word.bbox.x0), right: Math.max(start.word.bbox.x1, end.word.bbox.x1), start: startTime, end: endTime });
+  }
   return headers;
+}
+
+function extractFacultyDetails(lines) {
+  const headerIndex = lines.findIndex((line) => {
+    const words = line.words.map((word) => String(word.text || '').toLowerCase());
+    return words.some((word) => /^(faculty|instructor|lecturer|teacher)$/i.test(word))
+      && words.some((word) => /^code$/i.test(word))
+      && words.some((word) => /^subject$/i.test(word));
+  });
+  if (headerIndex < 0) return new Map();
+  const header = lines[headerIndex];
+  const centerX = (word) => (word.bbox.x0 + word.bbox.x1) / 2;
+  const codeHeader = header.words.find((word) => /^code$/i.test(word.text));
+  const subjectHeader = header.words.find((word) => /^subject$/i.test(word.text));
+  const facultyHeader = header.words.find((word) => /^(faculty|instructor|lecturer|teacher)$/i.test(word.text));
+  const codeX = centerX(codeHeader);
+  const subjectX = centerX(subjectHeader);
+  const facultyX = centerX(facultyHeader);
+  const facultyBoundary = subjectX + (facultyX - subjectX) * 0.68;
+  const details = new Map();
+  for (const line of lines.slice(headerIndex + 1)) {
+    const words = [...line.words].sort((a, b) => a.bbox.x0 - b.bbox.x0);
+    const code = words.find((word) => centerX(word) < subjectX - 20 && centerX(word) >= codeX - 30 && /^[A-Z][A-Z0-9-]{1,14}$/i.test(word.text));
+    if (!code) continue;
+    const subjectName = words
+      .filter((word) => centerX(word) >= subjectX - 20 && centerX(word) < facultyBoundary)
+      .map((word) => word.text)
+      .join(' ')
+      .trim();
+    const teacher = words
+      .filter((word) => centerX(word) >= facultyBoundary)
+      .map((word) => word.text)
+      .join(' ')
+      .trim();
+    if (subjectName && teacher) details.set(code.text.toLowerCase(), { code: code.text, subjectName, teacher });
+  }
+  return details;
 }
 
 function parsePositionedWords(words) {
@@ -218,7 +305,7 @@ function parsePositionedWords(words) {
   // OCR commonly splits a header such as "09:00 - 10:00" into separate
   // words or even separate lines. Keep the word coordinates and look for a
   // time range within a visual column instead of requiring one OCR line.
-  const headers = positionedTimeHeaders(lines);
+  const headers = positionedTimeHeaders(lines, dayRows);
   for (const line of lines) {
     const groups = clusters(line, 2.4);
     for (let start = 0; start < groups.length; start += 1) {
@@ -235,6 +322,7 @@ function parsePositionedWords(words) {
   const rowGap = dayGaps.length ? dayGaps[Math.floor((dayGaps.length - 1) / 2)] : 48;
   const halfBand = Math.max(12, Math.min(100, (rowGap || 48) / 2));
   const rows = [];
+  const breakPeriods = [];
   for (let dayIndex = 0; dayIndex < dayRows.length; dayIndex += 1) {
     const item = dayRows[dayIndex];
     // The weekday label and the subject baselines often differ enough that
@@ -255,14 +343,18 @@ function parsePositionedWords(words) {
         const orderedHeaders = [...uniqueHeaders].sort((a, b) => a.x - b.x);
         const headerIndex = orderedHeaders.reduce((best, header, index) => Math.abs(header.x - group.x) < Math.abs(orderedHeaders[best].x - group.x) ? index : best, 0);
         const header = orderedHeaders[headerIndex];
+        const distances = orderedHeaders.map((candidate) => Math.abs(candidate.x - group.x)).sort((a, b) => a - b);
         const leftBound = headerIndex === 0 ? header.x - Math.max(90, (orderedHeaders[1]?.x - header.x || 180) / 2) : (orderedHeaders[headerIndex - 1].x + header.x) / 2;
         const rightBound = headerIndex === orderedHeaders.length - 1 ? header.x + Math.max(90, (header.x - orderedHeaders[headerIndex - 1]?.x || 180) / 2) : (header.x + orderedHeaders[headerIndex + 1].x) / 2;
         const neighborGaps = [orderedHeaders[headerIndex - 1] && header.x - orderedHeaders[headerIndex - 1].x, orderedHeaders[headerIndex + 1] && orderedHeaders[headerIndex + 1].x - header.x].filter(Boolean);
         const maxColumnOffset = Math.min(140, Math.max(60, (Math.min(...neighborGaps, 180) * 0.45)));
-        if (group.x >= leftBound && group.x <= rightBound && Math.abs(group.x - header.x) <= maxColumnOffset) range = header;
+        if (group.x >= leftBound && group.x <= rightBound
+          && distances[0] <= maxColumnOffset
+          && (distances.length < 2 || distances[1] - distances[0] >= 30)) range = header;
       }
       let name = text.replace(/\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*(?:[-\u2010-\u2015\u2212]|to)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?/ig, '').trim();
-      if (!name || /^[-\u2010-\u2015\u2212|/]+$/.test(name) || /^(break|lunch|recess|free|day|subject|faculty|teacher|instructor|semester|section|batch)$/i.test(name)) return;
+      if (!name || /^[-\u2010-\u2015\u2212|/]+$/.test(name) || /^(day|subject|faculty|teacher|instructor|semester|section|batch)$/i.test(name)) return;
+      const isBreakPeriod = /^(break|lunch|recess|free)(?:\s+(?:break|period|time))?$/i.test(name);
       const locationMatch = name.match(/\b(?:room|rm|lab|classroom)\s*[:#-]?\s*[A-Z0-9-]+/i);
       const location = locationMatch?.[0] || '';
       if (location) name = name.replace(locationMatch[0], '').trim();
@@ -275,16 +367,26 @@ function parsePositionedWords(words) {
         const withoutSessionType = subjectName.replace(/\b(lab(?:oratory)?|practical|tutorial)\b/ig, '').replace(/\s{2,}/g, ' ').trim();
         if (withoutSessionType) subjectName = withoutSessionType;
       }
-      const row = rowResult({ subjectName, subjectCode: code, day: item.day, start: range?.start || range?.[1], end: range?.end || range?.[2], location, sessionType, section }, item.index + 1);
+      const row = rowResult({ subjectName: isBreakPeriod ? name : subjectName, subjectCode: code, day: item.day, start: range?.start || range?.[1], end: range?.end || range?.[2], location, sessionType, section }, item.index + 1);
+      if (isBreakPeriod) row.isBreakPeriod = true;
       const confidenceWords = [...group.words, item.dayWord].filter((word) => Number.isFinite(word.confidence));
       if (confidenceWords.length) {
         row.confidence = Math.round(confidenceWords.reduce((sum, word) => sum + word.confidence, 0) / confidenceWords.length);
         if (row.confidence < 55) row.issues.push('OCR confidence is low. Verify this row against the image.');
       }
-      rows.push(row);
+      if (isBreakPeriod) breakPeriods.push(row);
+      else rows.push(row);
     });
   }
-  return rows;
+  const facultyDetails = extractFacultyDetails(lines);
+  for (const row of rows) {
+    const detail = facultyDetails.get((row.subjectCode || row.subjectName).toLowerCase());
+    if (!detail) continue;
+    row.subjectCode = detail.code;
+    if (row.subjectName.toLowerCase() === detail.code.toLowerCase()) row.subjectName = detail.subjectName;
+    row.teacher = detail.teacher;
+  }
+  return [...rows, ...breakPeriods];
 }
 
 function parseTimetable(text, sourceType, words = []) {

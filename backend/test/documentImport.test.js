@@ -14,6 +14,24 @@ const { extractText, shutdownOcrWorker } = require('../services/documents/extrac
 
 after(shutdownOcrWorker);
 
+function extractionMetrics(expected, actual) {
+  const count = (predicate) => expected.reduce((total, row, index) => total + Number(predicate(row, actual[index])), 0);
+  return {
+    weekdayDetection: count((expectedRow, actualRow) => actualRow?.weekday === expectedRow.weekday),
+    subjectExtraction: count((expectedRow, actualRow) => actualRow?.subjectName === expectedRow.subjectName),
+    timeExtraction: count((expectedRow, actualRow) => actualRow?.startTime === expectedRow.startTime && actualRow?.endTime === expectedRow.endTime),
+    subjectToTimeSlotMapping: count((expectedRow, actualRow) => actualRow?.weekday === expectedRow.weekday
+      && actualRow?.subjectName === expectedRow.subjectName
+      && actualRow?.startTime === expectedRow.startTime
+      && actualRow?.endTime === expectedRow.endTime),
+  };
+}
+
+function assertExtractionMetrics(expected, actual, counts) {
+  assert.deepEqual(extractionMetrics(expected, actual), counts);
+  assert.equal(actual.length, expected.length, 'all visible class cells should remain reviewable');
+}
+
 function makeTextPdf(text) {
   const escaped = text.replace(/([\\()])/g, '\\$1');
   const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`;
@@ -32,12 +50,13 @@ function makeTextPdf(text) {
   return Buffer.from(pdf, 'ascii');
 }
 
-test('parses CSV timetable rows and normalizes weekdays and 12-hour times', () => {
-  const rows = parseTimetable('subject,code,day,start,end,location\nAlgorithms,CS101,Monday,9:00 AM,10:15 AM,Room 4', 'text/csv');
+test('parses CSV timetable rows, faculty names, and normalizes weekdays and 12-hour times', () => {
+  const rows = parseTimetable('subject,code,day,start,end,location,faculty\nAlgorithms,CS101,Monday,9:00 AM,10:15 AM,Room 4,Dr Rao', 'text/csv');
   assert.equal(rows.length, 1);
   assert.deepEqual({ subject: rows[0].subjectName, code: rows[0].subjectCode, day: rows[0].weekday, start: rows[0].startTime, end: rows[0].endTime, location: rows[0].location }, {
     subject: 'Algorithms', code: 'CS101', day: 0, start: '09:00', end: '10:15', location: 'Room 4',
   });
+  assert.equal(rows[0].teacher, 'Dr Rao');
   assert.deepEqual(rows[0].issues, []);
 });
 
@@ -102,6 +121,47 @@ test('joins OCR-split weekday letters and reads meridiem time headings from posi
   assert.deepEqual(rows.map((row) => [row.weekday, row.subjectName, row.startTime, row.endTime]), [
     [0, 'Algorithms', '09:00', '10:00'], [1, 'Databases', '09:00', '10:00'],
   ]);
+});
+
+test('pairs vertically stacked time endpoints by coordinate without assuming a fixed layout', () => {
+  const word = (text, x0, y0, x1, y1) => ({ text, bbox: { x0, y0, x1, y1 }, confidence: 92 });
+  const words = [
+    word('09:00', 160, 20, 200, 34), word('10:00', 160, 40, 200, 54),
+    word('10:00', 300, 20, 340, 34), word('11:00', 300, 40, 340, 54),
+    word('Monday', 10, 90, 72, 104), word('Algorithms', 155, 90, 250, 104),
+    word('Tuesday', 10, 140, 72, 154), word('Databases', 295, 140, 380, 154),
+  ];
+  const rows = parseTimetable('09:00\\n10:00\\n10:00\\n11:00\\nMonday Algorithms\\nTuesday Databases', 'image/jpeg', words);
+  assert.deepEqual(rows.map((row) => [row.weekday, row.subjectName, row.startTime, row.endTime]), [
+    [0, 'Algorithms', '09:00', '10:00'],
+    [1, 'Databases', '10:00', '11:00'],
+  ]);
+});
+
+test('does not guess a time when a class cell falls ambiguously between period columns', () => {
+  const word = (text, x0, y0, x1, y1) => ({ text, bbox: { x0, y0, x1, y1 }, confidence: 90 });
+  const words = [
+    word('09:00', 150, 20, 185, 34), word('-', 188, 20, 194, 34), word('10:00', 197, 20, 235, 34),
+    word('10:00', 250, 20, 285, 34), word('-', 288, 20, 294, 34), word('11:00', 297, 20, 335, 34),
+    word('Monday', 10, 80, 72, 94), word('Unclear', 222, 80, 278, 94),
+  ];
+  const [row] = parseTimetable('09:00 - 10:00 10:00 - 11:00\\nMonday Unclear', 'image/jpeg', words);
+  assert.equal(row.subjectName, 'Unclear');
+  assert.equal(row.startTime, null);
+  assert.equal(row.endTime, null);
+  assert.ok(row.issues.includes('Start/end time is missing or invalid.'));
+});
+
+test('does not import break periods as classes and retains their detected weekday and time', () => {
+  const word = (text, x0, y0, x1, y1) => ({ text, bbox: { x0, y0, x1, y1 }, confidence: 90 });
+  const words = [
+    word('09:00', 150, 20, 185, 34), word('-', 188, 20, 194, 34), word('10:00', 197, 20, 235, 34),
+    word('Monday', 10, 80, 72, 94), word('Lunch', 155, 80, 198, 94), word('Break', 202, 80, 245, 94),
+  ];
+  const rows = parseTimetable('09:00 - 10:00\\nMonday Lunch Break', 'image/jpeg', words);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].isBreakPeriod, true);
+  assert.deepEqual([rows[0].subjectName, rows[0].weekday, rows[0].startTime, rows[0].endTime], ['Lunch Break', 0, '09:00', '10:00']);
 });
 
 test('keeps recognizable day and subject cells reviewable when the image has no readable period headings', () => {
@@ -181,6 +241,15 @@ test('runs bundled local OCR on an actual JPEG timetable and maps its columns', 
     [0, 'Mathematics', '09:00', '10:00'], [0, 'Physics', '10:15', '11:15'],
     [1, 'Programming', '09:00', '10:00'], [1, 'Tutorial', '10:15', '11:15'],
   ]);
+  const expected = [
+    { weekday: 0, subjectName: 'Mathematics', startTime: '09:00', endTime: '10:00' },
+    { weekday: 0, subjectName: 'Physics', startTime: '10:15', endTime: '11:15' },
+    { weekday: 1, subjectName: 'Programming', startTime: '09:00', endTime: '10:00' },
+    { weekday: 1, subjectName: 'Tutorial', startTime: '10:15', endTime: '11:15' },
+  ];
+  assertExtractionMetrics(expected, rows, {
+    weekdayDetection: 4, subjectExtraction: 4, timeExtraction: 4, subjectToTimeSlotMapping: 4,
+  });
   assert.equal(rows[1].sessionType, 'lab');
   assert.equal(rows[3].sessionType, 'tutorial');
 });
@@ -192,9 +261,51 @@ test('runs local OCR on an abbreviated timetable with a separate faculty table',
   assert.ok(rows.length >= 20, `expected timetable cells, got ${rows.length}`);
   assert.deepEqual([...new Set(rows.map((row) => row.weekday))].sort(), [0, 1, 2, 3, 4]);
   assert.ok(rows.some((row) => row.weekday === 0 && row.subjectCode === 'CS101' && row.startTime === '09:00'));
+  assert.ok(rows.some((row) => row.subjectName === 'Data Structures' && row.teacher === 'Dr Rao'));
+  assert.ok(rows.some((row) => row.subjectName === 'Applied Mathematics' && row.teacher === 'Prof Shah'));
+  assert.ok(rows.some((row) => row.subjectName === 'Physics' && row.teacher === 'Dr Ali'));
   assert.ok(rows.some((row) => row.issues.includes('Start/end time is missing or invalid.')), 'ambiguous OCR headings stay reviewable');
   assert.ok(rows.every((row) => !/faculty|dr rao|prof shah/i.test(row.subjectName)), 'the lower faculty table is not imported as a class');
   assert.ok(rows.every((row) => row.subjectName !== '-'), 'empty cells are not emitted as subjects');
+  const times = [
+    ['09:00', '10:00'], ['10:00', '11:00'], ['11:15', '12:15'], ['13:00', '14:00'], ['14:00', '15:00'],
+  ];
+  const subjects = [
+    ['CS101', 'DBMS Lab', '', 'MATH', 'ENG'],
+    ['MATH', 'PHY', 'CS101', 'Tutorial', ''],
+    ['ENG', 'CS101', 'Lab', 'MATH', 'PHY'],
+    ['PHY', 'Tutorial', 'DBMS', '', 'MATH'],
+    ['CS101', 'MATH', 'PHY Lab', 'ENG', 'Tutorial'],
+  ];
+  const canonical = { CS101: 'Data Structures', MATH: 'Applied Mathematics', PHY: 'Physics' };
+  const expected = subjects.flatMap((daySubjects, weekday) => daySubjects.flatMap((value, period) => {
+    if (!value) return [];
+    const subjectName = canonical[value] || canonical[value.split(' ')[0]] || value.replace(/\s+Lab$/, '');
+    return [{ weekday, subjectName, startTime: times[period][0], endTime: times[period][1] }];
+  }));
+  assertExtractionMetrics(expected, rows, {
+    weekdayDetection: 22, subjectExtraction: 22, timeExtraction: 18, subjectToTimeSlotMapping: 18,
+  });
+});
+
+test('measures OCR accuracy on low-contrast and low-resolution timetable photos', async () => {
+  const source = fs.readFileSync(path.join(__dirname, 'timetable-sample.jpg'));
+  const expected = [
+    { weekday: 0, subjectName: 'Mathematics', startTime: '09:00', endTime: '10:00' },
+    { weekday: 0, subjectName: 'Physics', startTime: '10:15', endTime: '11:15' },
+    { weekday: 1, subjectName: 'Programming', startTime: '09:00', endTime: '10:00' },
+    { weekday: 1, subjectName: 'Tutorial', startTime: '10:15', endTime: '11:15' },
+  ];
+  const lowContrast = await sharp(source).linear(0.65, 55).jpeg({ quality: 50 }).toBuffer();
+  const extracted = await extractText(lowContrast, 'image/jpeg', 'low-contrast.jpg', { timetableOcr: true });
+  const rows = parseTimetable(extracted.text, extracted.sourceType, extracted.words);
+  assertExtractionMetrics(expected, rows, {
+    weekdayDetection: 4, subjectExtraction: 4, timeExtraction: 4, subjectToTimeSlotMapping: 4,
+  });
+
+  const lowResolution = await sharp(source).resize(600, 450).jpeg({ quality: 38 }).toBuffer();
+  const degraded = await extractText(lowResolution, 'image/jpeg', 'low-resolution.jpg', { timetableOcr: true });
+  assert.throws(() => parseTimetable(degraded.text, degraded.sourceType, degraded.words), /no timetable weekdays or class rows/i);
 });
 
 test('extracts calendar events, exams, and syllabus topics from JPEG uploads', async () => {

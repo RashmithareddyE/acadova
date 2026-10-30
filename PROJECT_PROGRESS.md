@@ -350,3 +350,40 @@ Phase 3 dashboard work is complete for this request. No Phase 4 work was started
 ### Submission recommendation
 
 The current project is ready for demonstration and academic submission within the limits of its implemented functionality, provided the evaluator runs it with a local MongoDB instance and the required environment variables. The project should be presented using the currently verified workflow and should not claim unsupported advanced features.
+
+## Timetable OCR local-only revision (2026-10-30)
+
+### Audit and changes
+
+- The timetable preview used bundled Tesseract.js, but sent images to OpenAI Vision when local extraction was incomplete or uncertain. This fallback could not work after API credits were exhausted and was a paid external dependency.
+- Coordinate parsing paired time endpoints on the same OCR line only, so vertically stacked start/end labels were missed. Candidate OCR selection also discarded useful high-confidence header words from other local preprocessing passes.
+- Replaced the paid fallback with local-only Tesseract.js preview handling. Local extraction errors are shown to the student, who can continue with the existing manual preview or manual timetable form. No document is saved until confirmation.
+- Added coordinate-based pairing for stacked time headers, candidate-header word merging, ambiguity rejection when a subject cell is centered between two periods, separate break/lunch detection, and timetable faculty lookup from code/name/faculty tables.
+- Faculty is editable in the import preview and is stored on the confirmed timetable entry. The existing manual timetable form also accepts faculty.
+- The frontend explicitly states that timetable image OCR is local and does not use a paid vision API. Removed the OpenAI fallback implementation and its provider-specific tests/configuration.
+
+### Free OCR evaluation and local operation
+
+- PaddleOCR was evaluated but not integrated. The current backend is Node.js-only; this environment has no `paddle` or `paddleocr` package installed. Adding PaddleOCR would require provisioning a Python runtime, installing Paddle dependencies, and managing local model files. The existing Tesseract.js 6 engine and English model are already bundled and work offline, so retaining it avoids adding a separately operated service and large model-download lifecycle.
+- Existing `sharp` preprocessing is retained: EXIF auto-orientation, bounded resizing, grayscale conversion, contrast normalization, sharpening, and a thresholded candidate. No OpenCV/Paddle packages or paid API dependencies were added. Arbitrary-angle deskewing and adaptive thresholding remain limitations.
+- Install and run the OCR path with `cd backend`, `npm install`, and `npm run dev`. There is no separate OCR server. The authenticated `POST /api/imports/timetable/preview` endpoint runs extraction and returns editable rows; the student confirms before rows are saved.
+- Backend OCR dependencies already present in `backend/package.json`: `tesseract.js` 6.0.1, `@tesseract.js-data/eng` 1.0.0, and `sharp` 0.35.5. No dependency manifest changes were needed.
+
+### Accuracy evidence (generated test images only)
+
+| Fixture | Weekday detection | Subject extraction | Exact time pairs | Subject-to-time mapping |
+|---|---:|---:|---:|---:|
+| Clear two-day timetable, 4 cells | 4/4 | 4/4 | 4/4 | 4/4 |
+| Low-contrast version, 4 cells | 4/4 | 4/4 | 4/4 | 4/4 |
+| Dense five-day timetable, 22 cells | 22/22 | 22/22 | 18/22 | 18/22 |
+| 600x450 compressed low-resolution version | No reliable rows; manual review required | — | — | — |
+
+- These figures are regression measurements against generated fixtures, not a claim of accuracy on arbitrary student or college images. Missing dense-table headers remain blank/flagged rather than being assigned to a guessed period. No representative user-provided photo was available.
+- Tests also cover stacked time headers, ambiguous column centers, break periods, separate faculty tables, CSV faculty, OCR failure/manual recovery, and local-only preview behavior.
+
+### Validation
+
+- `node --test test/documentImport.test.js test/timetablePreview.test.js` in `backend`: passed (30 tests), including accuracy measurements.
+- `node --test test/*.test.js` in `backend`: passed (89 tests).
+- `npm.cmd run build` in `frontend`: passed.
+- Backend syntax checks for the modified parser, extractor, import/academic controllers, and academic model: passed.

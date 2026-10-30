@@ -208,17 +208,50 @@ async function recognizeTimetableImage(buffer, worker) {
     results.push({ ...result, scaleX: candidate.scaleX, scaleY: candidate.scaleY, quality: scoreOcrResult(result) });
   }
   const best = selectBestOcrResult(results);
+  const normalizeCoordinates = (word, scaleX, scaleY) => ({
+    ...word,
+    bbox: {
+      x0: word.bbox.x0 / scaleX,
+      y0: word.bbox.y0 / scaleY,
+      x1: word.bbox.x1 / scaleX,
+      y1: word.bbox.y1 / scaleY,
+    },
+  });
+  const words = best?.words.map((word) => normalizeCoordinates(word, best.scaleX, best.scaleY)) || [];
+  const firstDayY = Math.min(...words
+    .filter((word) => weekdayLike(word.text))
+    .map((word) => word.bbox.y0));
+  if (Number.isFinite(firstDayY)) {
+    for (const candidate of results) {
+      if (candidate === best) continue;
+      for (const source of candidate.words) {
+        const word = normalizeCoordinates(source, candidate.scaleX, candidate.scaleY);
+        const centerY = (word.bbox.y0 + word.bbox.y1) / 2;
+        if (centerY >= firstDayY || !/\d/.test(word.text) || (Number(word.confidence) || 0) < 55) continue;
+        const overlaps = words.map((current, index) => {
+          const width = Math.max(0, Math.min(current.bbox.x1, word.bbox.x1) - Math.max(current.bbox.x0, word.bbox.x0));
+          const height = Math.max(0, Math.min(current.bbox.y1, word.bbox.y1) - Math.max(current.bbox.y0, word.bbox.y0));
+          const smallerArea = Math.min(
+            (current.bbox.x1 - current.bbox.x0) * (current.bbox.y1 - current.bbox.y0),
+            (word.bbox.x1 - word.bbox.x0) * (word.bbox.y1 - word.bbox.y0)
+          );
+          return smallerArea > 0 && width * height / smallerArea > 0.25 ? index : -1;
+        }).filter((index) => index >= 0);
+        if (!overlaps.length) words.push(word);
+        else {
+          const weakest = overlaps.reduce((bestIndex, index) => (
+            (Number(words[index].confidence) || 0) < (Number(words[bestIndex].confidence) || 0) ? index : bestIndex
+          ), overlaps[0]);
+          if ((Number(word.confidence) || 0) > (Number(words[weakest].confidence) || 0) + 5) {
+            words.splice(weakest, 1, word);
+          }
+        }
+      }
+    }
+  }
   return best && {
     text: best.text,
-    words: best.words.map((word) => ({
-      ...word,
-      bbox: {
-        x0: word.bbox.x0 / best.scaleX,
-        y0: word.bbox.y0 / best.scaleY,
-        x1: word.bbox.x1 / best.scaleX,
-        y1: word.bbox.y1 / best.scaleY,
-      },
-    })),
+    words,
   };
 }
 

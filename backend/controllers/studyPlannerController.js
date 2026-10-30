@@ -7,11 +7,12 @@ const { StudyPreferences, StudySession } = require('../models/StudyPlanner');
 const OrganizerTask = require('../models/OrganizerTask');
 const { generatePlan, slotConflicts, toMinutes, WEEKDAY, dateString } = require('../services/planner/generatePlan');
 const { getRecommendations } = require('../services/planner/recommendations');
+const { applicationDateString } = require('../utils/applicationDate');
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const idString = (value) => String(value?._id || value?.id || value);
-const todayUtc = () => new Date().toISOString().slice(0, 10);
+const todayDate = () => applicationDateString();
 
 function defaultPreferences() {
   return { availableHoursPerDay: null, studyStartTime: '', studyEndTime: '', sessionMinutes: 45, breakMinutes: 10, studyDays: [], prioritySubjects: [], commitments: [] };
@@ -48,7 +49,7 @@ exports.updatePreferences = asyncHandler(async (req, res) => {
 });
 
 exports.getOverview = asyncHandler(async (req, res) => {
-  const exams = await Exam.find({ user: req.user.id, date: { $gte: new Date(`${todayUtc()}T00:00:00.000Z`) } }).populate('subject', 'name code').sort({ date: 1, startTime: 1 });
+  const exams = await Exam.find({ user: req.user.id, date: { $gte: new Date(`${todayDate()}T00:00:00.000Z`) } }).populate('subject', 'name code').sort({ date: 1, startTime: 1 });
   const topics = await SyllabusTopic.find({ user: req.user.id }).select('subject unit topic completed progress');
   const progress = new Map();
   for (const topic of topics) {
@@ -64,7 +65,7 @@ exports.getOverview = asyncHandler(async (req, res) => {
   const sessionStatus = new Map(); sessions.forEach((session) => { const values = sessionStatus.get(idString(session.exam)) || []; values.push(session.status); sessionStatus.set(idString(session.exam), values); });
   const overview = exams.map((exam) => {
     const syllabus = progress.get(idString(exam.subject)) || { total: 0, completed: 0, inProgress: 0, notStarted: 0, topics: [] };
-    const daysRemaining = Math.max(0, Math.ceil((new Date(`${dateString(new Date(exam.date))}T00:00:00.000Z`) - new Date(`${todayUtc()}T00:00:00.000Z`)) / 86400000));
+    const daysRemaining = Math.max(0, Math.ceil((new Date(`${dateString(new Date(exam.date))}T00:00:00.000Z`) - new Date(`${todayDate()}T00:00:00.000Z`)) / 86400000));
     const statuses = sessionStatus.get(idString(exam)) || [];
     const studyPlanStatus = !statuses.length ? 'not generated' : statuses.includes('planned') ? 'in progress' : statuses.every((status) => status === 'completed') ? 'completed' : 'needs rescheduling';
     return { ...exam.toObject(), daysRemaining, syllabus, studyPlanStatus };
@@ -73,7 +74,7 @@ exports.getOverview = asyncHandler(async (req, res) => {
 });
 
 exports.getDashboard = asyncHandler(async (req, res) => {
-  const today = todayUtc();
+  const today = todayDate();
   const start = new Date(`${today}T00:00:00.000Z`);
   const [sessions, exam, preferences] = await Promise.all([
     StudySession.find({ user: req.user.id, date: today, status: 'planned' })
@@ -101,7 +102,7 @@ exports.listSessions = asyncHandler(async (req, res) => {
 });
 
 async function buildPlanPreview(userId) {
-  const today = todayUtc();
+  const today = todayDate();
   const preferences = await StudyPreferences.findOne({ user: userId }).lean();
   if (!preferences) throw new AppError(400, 'Set your study availability and study days before generating a plan.');
   const [exams, topics, timetable, calendar, assignments, existingSessions] = await Promise.all([
@@ -166,13 +167,20 @@ exports.generate = asyncHandler(async (req, res) => {
 async function assertSessionSlot({ session, date, startTime, durationMinutes, preferences, userId }) {
   const dateValue = DATE.test(date || '') ? new Date(`${date}T00:00:00.000Z`) : null;
   if (!dateValue || Number.isNaN(dateValue.getTime()) || dateValue.toISOString().slice(0, 10) !== date || !TIME.test(startTime || '') || !Number.isInteger(durationMinutes) || durationMinutes < 15 || durationMinutes > 180) throw new AppError(400, 'Choose a valid date, start time, and duration.');
-  if (date < todayUtc() || date >= dateString(new Date(session.examDate))) throw new AppError(400, 'Study sessions must be scheduled from today up to the day before the examination.');
+  if (date < todayDate() || date >= dateString(new Date(session.examDate))) throw new AppError(400, 'Study sessions must be scheduled from today up to the day before the examination.');
   if (!(preferences.studyDays || []).includes(WEEKDAY(date))) throw new AppError(400, 'Choose one of your configured study days.');
   const start = toMinutes(preferences.studyStartTime); const end = toMinutes(preferences.studyEndTime); const begins = toMinutes(startTime);
   if (begins < start || begins + durationMinutes > end || begins + durationMinutes > 1440) throw new AppError(400, 'The session must fit within your preferred study window.');
   const [classes, events, otherSessions] = await Promise.all([
     TimetableEntry.find({ user: userId, weekday: WEEKDAY(date) }),
-    CalendarEvent.find({ user: userId, date: { $lte: new Date(`${date}T23:59:59.999Z`) }, $or: [{ endDate: null }, { endDate: { $gte: new Date(`${date}T00:00:00.000Z`) } }] }),
+    CalendarEvent.find({
+      user: userId,
+      date: { $lte: new Date(`${date}T23:59:59.999Z`) },
+      $or: [
+        { endDate: { $gte: new Date(`${date}T00:00:00.000Z`) } },
+        { endDate: null, date: { $gte: new Date(`${date}T00:00:00.000Z`) } },
+      ],
+    }),
     StudySession.find({ user: userId, date, _id: { $ne: session._id } }),
   ]);
   if (events.length) throw new AppError(409, 'This date has an academic calendar commitment. Choose another day.');
@@ -191,7 +199,7 @@ exports.updateSession = asyncHandler(async (req, res) => {
   const date = req.body.date ?? session.date;
   const startTime = req.body.startTime ?? session.startTime;
   const durationMinutes = req.body.durationMinutes ?? session.durationMinutes;
-  if (status === 'completed' && date > todayUtc()) throw new AppError(400, 'A future study session cannot be marked completed.');
+  if (status === 'completed' && date > todayDate()) throw new AppError(400, 'A future study session cannot be marked completed.');
   const preferences = await StudyPreferences.findOne({ user: req.user.id }).lean();
   if (!preferences) throw new AppError(400, 'Study preferences are unavailable.');
   if (status === 'planned' || date !== session.date || startTime !== session.startTime || durationMinutes !== session.durationMinutes) {

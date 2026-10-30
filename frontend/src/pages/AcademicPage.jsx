@@ -13,7 +13,7 @@ const CONFIG = {
     ['name', 'Subject name', 'text', true], ['code', 'Subject code', 'text', true], ['teacher', 'Teacher / instructor', 'text'], ['credits', 'Credits', 'number', true], ['description', 'Description', 'textarea'],
   ] },
   timetable: { title: 'Weekly Timetable', singular: 'class', fields: [
-    ['subject', 'Subject', 'subject', true], ['weekday', 'Weekday', 'weekday', true], ['startTime', 'Start time', 'time', true], ['endTime', 'End time', 'time', true], ['location', 'Classroom / location', 'text'], ['sessionType', 'Session type', 'sessionType'],
+    ['subject', 'Subject', 'subject', true], ['weekday', 'Weekday', 'weekday', true], ['startTime', 'Start time', 'time', true], ['endTime', 'End time', 'time', true], ['teacher', 'Faculty / instructor', 'text'], ['location', 'Classroom / location', 'text'], ['sessionType', 'Session type', 'sessionType'],
   ] },
   calendar: { title: 'Academic Calendar', singular: 'event', fields: [
     ['title', 'Title', 'text', true], ['type', 'Event type', 'calendarType', true], ['date', 'Date', 'date', true], ['endDate', 'End date (optional)', 'date'], ['description', 'Description', 'textarea'],
@@ -165,7 +165,7 @@ export default function AcademicPage({ resource }) {
 
   function details(record) {
     if (resource === 'subjects') return `${record.teacher || 'No instructor'} · ${record.credits} credits${record.description ? ` · ${record.description}` : ''}`;
-    if (resource === 'timetable') return `${record.subject?.name || titleBySubject[record.subject]}${record.sessionType ? ` · ${record.sessionType}` : ''}${record.location ? ` · ${record.location}` : ''}`;
+    if (resource === 'timetable') return `${record.subject?.name || titleBySubject[record.subject]}${record.teacher ? ` · ${record.teacher}` : ''}${record.sessionType ? ` · ${record.sessionType}` : ''}${record.location ? ` · ${record.location}` : ''}`;
     if (resource === 'calendar') return `${record.type} · ${displayDate(record.date)}${record.endDate ? ` – ${displayDate(record.endDate)}` : ''}${record.description ? ` · ${record.description}` : ''}`;
     if (resource === 'exams') return `${record.subject?.name || titleBySubject[record.subject]} · ${record.type} · ${displayDate(record.date)} · ${record.startTime}–${record.endTime}${record.venue ? ` · ${record.venue}` : ''}${record.notes ? ` · ${record.notes}` : ''}`;
     const progress = record.completed || record.progress === 'completed' ? 'completed' : record.progress || 'not-started';

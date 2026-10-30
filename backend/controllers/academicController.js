@@ -18,7 +18,7 @@ function cleanPayload(resource, body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'Request body must be an object.');
   const fields = {
     subjects: ['name', 'code', 'teacher', 'credits', 'description'],
-    timetable: ['subject', 'weekday', 'startTime', 'endTime', 'location', 'sessionType'],
+    timetable: ['subject', 'weekday', 'startTime', 'endTime', 'location', 'teacher', 'sessionType'],
     calendar: ['title', 'type', 'date', 'endDate', 'description'],
     exams: ['title', 'type', 'subject', 'date', 'startTime', 'endTime', 'venue', 'notes'],
     syllabus: ['subject', 'unit', 'topic', 'completed', 'progress'],
