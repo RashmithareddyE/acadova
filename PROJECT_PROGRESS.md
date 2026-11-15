@@ -1,6 +1,52 @@
 # Acadova project progress
 
-Updated: 2026-10-28
+Updated: 2026-11-14
+
+## Intelligent Academic Companion & Module Connection Phase
+
+### Verified Working in the Current Repository
+
+1. **Academic Calendar Intelligence (Task 2)**:
+   - Calendar schema extended to support explicit event types: `holiday`, `working-saturday`, `special-working-day`, `cancelled-class`, `semester-start`, `semester-end`, `exam`, `deadline`, `college`, and `event`.
+   - Document import parser enhanced with regex detection for each calendar event type.
+   - Added interactive Monthly Calendar View (`MonthCalendar`) with month navigation, event badges with color distinctions, and click-to-edit / click-to-add interactions alongside list view.
+
+2. **Intelligent Attendance Prediction Connected to Timetable & Calendar (Task 3)**:
+   - Implemented `projectSemesterAttendance` engine in `backend/services/attendanceCalculator.js`.
+   - Correctly integrates weekly timetable with the academic calendar:
+     - Excludes college holidays and multi-day holiday ranges.
+     - Excludes cancelled classes.
+     - Includes working Saturdays and special working days.
+     - Strictly respects semester end boundaries and avoids inventing unconfigured future classes.
+   - Calculates classes conducted, classes attended, current percentage, remaining scheduled classes, safe misses, recovery classes, and projected final attendance.
+   - Fully connected to `/api/attendance/summary` and `/api/attendance/today`.
+
+3. **Attend / Miss Intentions & Official Confirmation (Task 4)**:
+   - Interactive `[I'll Attend]` and `[I'll Miss]` buttons on Today Dashboard that model projected attendance scenarios without mutating official records.
+   - Separate post-class confirmation `[Present]` and `[Absent]` buttons that update official records in MongoDB with duplicate prevention.
+
+4. **Intelligent Subject-Wise Attendance Warnings (Task 5)**:
+   - Rendered directly below each subject on the dashboard and attendance pages.
+   - Mathematically derived status messages distinguishing below target (< 75%), near target / at risk, and comfortable/healthy states.
+
+5. **Today Dashboard Integration (Task 6)**:
+   - Serves as the landing page after login.
+   - Shows current date, weekday, today's classes with faculty, timings, room numbers, attendance %, and warnings.
+   - Displays holiday state ("Today is a College Holiday!") with holiday title, description, and recommended activities without displaying regular classes as active classes.
+   - Displays assignments due today, overdue assignments, upcoming deadlines, pending tasks, and study sessions below classes.
+
+6. **Manual Attendance Baseline Initialization (Task 7)**:
+   - Added `initialConducted` and `initialAttended` fields to `Subject` schema with validation (`initialAttended <= initialConducted`).
+   - Supports mid-semester joiners through counts or percentage-only baseline via `PUT /api/attendance/baseline`.
+   - Continues all future calculations from the baseline without creating artificial historical log records.
+
+7. **Automated Verification (Task 8)**:
+   - Added test suite `backend/test/attendancePrediction.test.js` covering 16 scenarios including holiday exclusion, working Saturday inclusion, cancelled class exclusion, semester boundaries, attendance projection, intentions, actual attendance confirmation, manual baseline initialization, subject-wise warnings, dashboard holiday display, and India timezone boundaries.
+   - 124/124 backend tests passing (`node --test`).
+   - 5/5 frontend unit tests passing (`node --test test/*.test.js`).
+   - Frontend production build passing (`npm.cmd run build`).
+
+---
 
 ## Phase 8 stabilization and QA status
 
@@ -387,3 +433,164 @@ The current project is ready for demonstration and academic submission within th
 - `node --test test/*.test.js` in `backend`: passed (89 tests).
 - `npm.cmd run build` in `frontend`: passed.
 - Backend syntax checks for the modified parser, extractor, import/academic controllers, and academic model: passed.
+
+## Universal timetable-to-CSV conversion (2026-10-30)
+
+### Changes
+
+- Added one canonical CSV format (`subject,subject_code,day,start_time,end_time,faculty,location,session_type`) for timetable imports. Serialization uses a UTF-8 BOM, escaped CSV fields, and 24-hour times.
+- Added canonical normalization, weekday/header aliases, validation for missing or invalid values, row-level duplicate and overlap warnings, and merging of contiguous laboratory periods so they do not create duplicate attendance sessions.
+- Extended extraction to use positioned text for digital PDFs, local OCR for scanned PDFs and images, and worksheet-row conversion for XLSX. Existing CSV uploads are normalized through the same format.
+- Routed extracted rows through the existing timetable parser and owner-scoped academic create API; no competing importer, persistence endpoint, or database schema was added.
+- Expanded the import preview for original-file review, editable normalized rows, warnings, canonical CSV download, and explicit confirmation before saving. Existing manual timetable entry remains available.
+- Corrected a positioned-header regression: fallback time-header grouping now runs only when positioned time headers were not found, avoiding duplicate or guessed period columns.
+
+### Validation and limitations
+
+- `node --test test/*.test.js` in `backend`: passed (101 tests), including existing image OCR fixtures, digital/scanned PDF extraction, XLSX, CSV normalization/round-trip, layout variations, laboratory merging, validation, and preview behavior.
+- `npm.cmd run build` in `frontend`: passed.
+- Focused positioned-OCR and low-resolution/abbreviated OCR regression tests passed. Accuracy tests use generated fixtures; they do not establish universal accuracy for arbitrary college timetables.
+- MongoDB persistence was not exercised against a live database in this work. Students must review and confirm extracted rows before the existing authenticated save flow runs.
+- The backend dependency audit still reports unrelated existing advisories in `body-parser`, `mongoose`, and `qs`; these were not changed as part of timetable conversion.
+
+## Senior Developer Continuation & Stabilization (2026-11-14)
+
+### Issues Resolved
+
+1. **Manual Timetable Entry with Empty sessionType**:
+   - Resolved schema enum validation failure where empty strings in manual forms became `null`, causing Mongoose enum validation rejections. Added a setter to `sessionType` in `models/Academic.js` and payload normalization in `academicController.js` and `AcademicPage.jsx`.
+2. **UTC vs. India Timezone Handling**:
+   - Added `timetableWeekdayForDate` and `applicationWeekday` to `applicationDate.js`. Standardized `copilotAssistant.js`, `organizerController.js`, and `attendanceController.js` on `applicationDateString()`.
+3. **Copilot Exam NaN Days & Undefined Study-Session End Times**:
+   - Fixed `getExamDaysRemaining` to safely extract date components from Mongoose Date objects or ISO strings without double appending `T00:00:00.000Z`.
+   - Replaced undefined `session.endTime` with computed end time from `session.startTime` and `session.durationMinutes`.
+4. **Copilot Intent Routing Overhaul**:
+   - Fixed route precedence so questions like "What classes should I attend today?" route to Timetable instead of Attendance.
+   - Fixed greedy `what.*today` regex pattern that was incorrectly routing study queries into timetable.
+   - Added clean routing for Notes, Timetable without 'today', Exams, Study Plan, and Syllabus.
+5. **Subject Deletion Confirmation**:
+   - Added explicit confirmation prompt with warning detailing cascade deletion of classes, attendance records, exams, syllabus, and study sessions.
+6. **Study Planner Rescheduling**:
+   - Guarded `assertSessionSlot` when `session.exam` is null. Handled E11000 duplicate session slots with HTTP 409 responses. Added `useEffect` in frontend `SessionCard` to keep draft synchronized when props change.
+7. **Attendance Duplicate Prevention**:
+   - Added unique partial index `{ user: 1, subject: 1, date: 1 }` with `{ timetableEntry: null }` in `models/Attendance.js` to prevent duplicate manual attendance records. Handled E11000 in `createRecord` and `updateRecord`.
+8. **Today Dashboard Refinements**:
+   - Added faculty display in each class card, using `entry.teacher || subject.teacher`.
+   - Prominently styled and formatted the "Today is a College Holiday!" banner, displaying holiday details and showing pending tasks and study actions instead of normal classes.
+9. **Timetable CSV Export**:
+   - Added an "Export Timetable (CSV)" button in `AcademicPage.jsx` when viewing timetable, allowing instant export of saved timetable rows in the canonical CSV format.
+10. **Unified Navigation**:
+    - Synchronized main navigation bars across `Dashboard`, `AcademicPage`, `AttendancePage`, `StudyPlannerPage`, `OrganizerPage`, and `CopilotPage`.
+
+### Verification
+
+- `cd backend && node --test`: 108 tests passed (0 failures).
+- `cd frontend && node --test test/*.test.js`: 5 tests passed (0 failures).
+- `cd frontend && npm.cmd run build`: Vite production build passed (46 modules transformed).
+
+## Timetable Extraction Debugging & Prevention of Corrupted Data (2026-11-14)
+
+### Problem Statement & Root Cause Analysis
+
+When uploading timetable images or scanned documents, the preview previously allowed corrupted strings (e.g., `"or =] | [van smn = T= | wma ||| [| wy on || uu me || de i [seca IE 100 Pw ow [[TORRE]"`) to be treated as valid subject names, with missing codes, start times, end times, faculty, and locations. Furthermore, these incomplete/corrupted rows were allowed to reach the preview and confirmation stages.
+
+Root causes identified and addressed:
+1. **Horizontal Clustering Across Table Grid Borders**:
+   - OCR token clustering grouped words based on horizontal distance thresholds alone. Table vertical grid lines and borders (`|`, `|||`, `[|`, `---`, `=]`) bridged the gaps between distinct timetable columns, causing horizontal token chains across period boundaries.
+2. **Header Fallback Clobbering**:
+   - In `parsePositionedWords`, running `rangePattern` line searching unconditionally when `positionedTimeHeaders` had already extracted precise column coordinates caused duplicate, missing, or merged period headers.
+3. **Delimiter Detection Collision on Image OCR**:
+   - Delimiter detection (`/,|\t/.test(...)`) triggered on ordinary image OCR text containing commas, routing raw image OCR output into the CSV parser, resulting in empty, unmapped rows.
+4. **Location Keyword Collision**:
+   - The regex `/\b(?:room|rm|lab|classroom)\s*[:#-]?\s*[A-Z0-9-]+/i` lacked a word boundary after `lab`, causing words like `"Laboratory"` to match as a location (`lab` + `oratory`) and strip period end times.
+5. **No Strict Import Validation or Garbage Rejection**:
+   - OCR garbage strings (low vowel ratios, high symbol ratios, fragmented single-character tokens) were not discarded prior to cell mapping.
+   - The UI permitted importing rows with missing subjects, unverified weekdays, or invalid time ranges.
+
+### Technical Solutions & Implementation
+
+1. **OCR Noise & Garbage Filtering (`backend/services/documents/parseTimetable.js`)**:
+   - `isBorderArtifact(text)`: Identifies and strips standalone table borders, dividers, and noise symbols (`|`, `|||`, `[|`, `=]`, `==`, `---`).
+   - `cleanCellText(text)`: Strips leading/trailing border punctuation while preserving internal quotes and legitimate abbreviations.
+   - `isCorruptedOrGarbage(text, words)`: Analyzes symbol-to-alphanumeric ratio, noise tokens, word fragmentation, vowel ratio (< 15% in multi-word text), and OCR confidence (< 35%) to reject hallucinated or garbage text.
+2. **Timetable Structure Recognition**:
+   - **Transposed Layouts**: Implemented `transposeWordCoordinates(words)` and `parseTransposedLayout(lines, dayRows)` to support timetables with weekdays in columns and period times in rows.
+   - **Stacked & Separate Time Headings**: Added `positionedTimeHeaders` reading separate start-time (`startTimeX`) and end-time (`endTimeX`) headers.
+   - **Merged Laboratory Periods**: Enhanced cross-column lab detection (`isLabOrPractical || isWideSpan` where width > 1.25x average column width) to merge laboratory blocks across periods without duplicate attendance sessions.
+   - **Break/Lunch Filtering**: Dedicated detection for break, lunch, and recess periods with appropriate metadata marking.
+3. **Prevention of Incorrect Imports & Strict Validation**:
+   - Strict row classification: `status: 'valid' | 'needs-review' | 'invalid'`.
+   - A row is classified as `invalid` if it is missing a subject, has an unverified weekday, has invalid start/end times, or has end time earlier than start time.
+   - Missing optional fields (`teacher`, `location`, `subjectCode`, `sessionType`) remain allowed and do not invalidate a row.
+   - If extraction cannot identify structured rows or only produces garbage, an HTTP 422 error is returned with an actionable message: `"Unable to confidently recognize this timetable. Please correct the information manually or verify the image quality."`
+4. **Enhanced Extraction Preview (`frontend/src/components/TimetableImport.jsx`)**:
+   - Added confidence pills (`{row.confidence}% confidence`) with high/medium/low visual indicators.
+   - Added original detected text display: `Detected text: <code>...</code>`.
+   - Added status badges: `Successfully recognized` (green), `Needs review` (amber), and `Invalid · Missing required fields` (red).
+   - Added an editable `Subject Code` field.
+   - Added a top summary bar displaying valid, needs review, and invalid counts.
+   - Added a `"Remove invalid rows ({invalidCount})"` button for one-click cleanup of uncorrectable rows.
+   - Blocked `"Confirm and import"` button whenever any invalid rows remain or required fields are missing, with clear instructions explaining what needs correction.
+5. **Universal 8-Column CSV Preservation**:
+   - Maintained canonical format: `subject,subject_code,day,start_time,end_time,faculty,location,session_type`.
+   - Full round-trip support: Preview rows can be exported to canonical CSV and re-imported cleanly.
+
+### Verification & Test Suite
+
+- **Comprehensive Test Suite Added (`backend/test/timetableExtraction.test.js`)**:
+  - Tests border artifact detection and cell text cleaning.
+  - Tests garbage rejection and noise row dropping.
+  - Tests free-text inline subject legends with instructor names.
+  - Tests laboratory multi-column merging and break/lunch detection.
+  - Tests validation status classification and HTTP 422 rejection on unreadable timetables.
+- **Backend Tests**: `cd backend && node --test` -> **133 tests passed, 0 failures** across all test suites.
+- **Frontend Unit Tests**: `cd frontend && node --test test/quickTask.test.js` -> **5 tests passed, 0 failures**.
+- **Frontend Production Build**: `cd frontend && npm.cmd run build` -> **Built successfully in 341ms** (46 modules transformed, zero errors/warnings).
+
+## Core Engine Development: Backend Connectivity, Academic Calendar Extraction & Timetable Integration (2026-11-15)
+
+### 1. Root Cause of Backend Connectivity Issues & Systemic Fix
+**Problem**: The application repeatedly displayed `"Cannot reach the Acadova server. Check your connection and try again."` on Login and Academic Calendar import pages.
+**Root Causes Identified**:
+1. **Missing Vite Dev Proxy**: `frontend/vite.config.js` lacked an `/api` proxy configuration. Frontend requests defaulted directly to `http://localhost:5000/api`. If the user accessed the frontend via `127.0.0.1` or network IP, cross-origin fetch requests failed due to CORS and browser cookie cross-site blocking.
+2. **CORS Restrictions & Header Blocking**: `backend/app.js` CORS origin check strictly checked `CLIENT_URL` (only `http://localhost:5173`), rejecting `127.0.0.1` and alternate dev ports. Custom header `X-File-Name` was missing from explicit `allowedHeaders`.
+3. **Payload Limit Conflicts**: File upload limit was hardcoded to 12MB. Multi-page scanned PDFs or high-resolution timetable images caused immediate connection termination or 413 rejections.
+4. **Server Startup Crash on Database Connection**: `backend/server.js` terminated with `process.exit(1)` immediately if MongoDB was starting or temporarily disconnected, leaving port 5000 dead.
+5. **Error Masking in `api.js`**: `catch` blocks discarded the underlying `Error` object, preventing developers from seeing exact network or CORS failure reasons in console.
+
+**Fixes Applied**:
+- Configured Vite reverse proxy in `frontend/vite.config.js` to route `/api` to `http://127.0.0.1:5000`.
+- Standardized `frontend/src/lib/api.js` to default `BASE_URL` to `'/api'` in browser environments while supporting `VITE_API_URL`.
+- Enhanced CORS in `backend/app.js` with regex `/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/` and explicitly allowed headers (`Content-Type`, `Authorization`, `X-File-Name`, `X-Requested-With`, `Accept`).
+- Increased file upload and processing limits from 12MB to 25MB across `importRoutes.js`, `extractText.js`, `AcademicImport.jsx`, and `TimetableImport.jsx`.
+- Hardened `backend/server.js`: If MongoDB connection fails at startup, the HTTP server still starts, exposes `/api/health`, and schedules automatic background reconnection retries every 5s.
+- Added detailed error diagnostics via `console.error` in `frontend/src/lib/api.js`.
+
+### 2. Academic Calendar Extraction Engine
+**Features Added (`parseAcademicDocs.js` & `importController.js`)**:
+- Full DSCE UG Calendar of Events format support: August to December 2026, 85 working days, 2-digit years (`26` -> `2026`), date ranges (`12.10.2026 to 14.10.2026`), and onwards dates (`21.12.2026 onwards`).
+- Complete event classification across 10 calendar types: `holiday`, `working-saturday`, `special-working-day`, `cancelled-class`, `semester-start`, `semester-end`, `exam` (CIE-1/2/3, Lab CIE, SEE Theory), `deadline`, `college`, and `event`.
+- Supported semester selection (`3rd Semester` vs `5th Semester` vs `All Semesters`) in backend parser and frontend `AcademicImport.jsx`.
+- Calendar summary metrics detection returning total working days (e.g. 85), holidays count, exams count, working Saturdays count, semester commencement, and semester conclusion dates.
+- Enhanced `AcademicImport.jsx` with semester dropdown, detected metrics summary bar, and complete 10-type event dropdown.
+
+### 3. Timetable & Academic Calendar Integration
+**Features Added (`attendanceController.js` & `attendanceCalculator.js`)**:
+- Connected `getSchedule` with `CalendarEvent`:
+  - Suppresses scheduled classes on confirmed college holidays.
+  - Excludes classes on cancelled class dates (`cancelled-class`).
+  - Enforces semester boundaries: never invents classes prior to `semester-start` or after `semester-end`.
+  - Maps working Saturdays (`working-saturday`) and special working days (`special-working-day`) following specified weekday timetables.
+- Hardened `attendanceCalculator.js` to ensure working Saturdays and special working days use actual subject mappings without inventing fake attendance classes.
+
+### 4. Verification & Test Suite
+- **Added Integration Test Suite (`backend/test/academicCalendarExtraction.test.js`)**:
+  - Tests DSCE UG Calendar parsing (85 working days, CIE-1/2/3, SEE, holidays, semester commencement/conclusion).
+  - Tests 2-digit year normalization (`15.08.26` -> `2026-08-15`).
+  - Tests semester-specific filtering (`3rd Sem` vs `5th Sem`).
+  - Tests `getSchedule` calendar integration (holiday suppression and semester boundaries).
+- **Backend Tests**: `cd backend && node --test` -> **137 tests passed, 0 failures** across all 12 test suites.
+- **Frontend Unit Tests**: `cd frontend && node --test test/quickTask.test.js` -> **5 tests passed, 0 failures**.
+- **Frontend Production Build**: `cd frontend && npm.cmd run build` -> **Built successfully in 573ms** (46 modules transformed, zero errors/warnings).
+
+
