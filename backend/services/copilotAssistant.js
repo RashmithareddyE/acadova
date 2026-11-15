@@ -4,9 +4,9 @@ const User = require('../models/User');
 const OrganizerTask = require('../models/OrganizerTask');
 const { StudySession } = require('../models/StudyPlanner');
 const { summarizeStatuses, attendanceInsight } = require('./attendanceCalculator');
+const { applicationDateString, timetableWeekdayForDate } = require('../utils/applicationDate');
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const TODAY = () => new Date();
 
 function normalize(value = '') {
   return String(value).trim().toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ');
@@ -22,17 +22,34 @@ function subjectLabel(subject) {
   return subject.code ? `${name} (${subject.code})` : name;
 }
 
+function toMinutes(time) {
+  const [h, m] = String(time || '00:00').split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
+function fromMinutes(totalMinutes) {
+  const h = Math.floor(totalMinutes / 60) % 24;
+  const m = totalMinutes % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 function getTodayClasses(entries) {
-  const now = TODAY();
-  const weekday = (now.getDay() + 6) % 7;
+  const today = applicationDateString();
+  const weekday = timetableWeekdayForDate(today);
   return entries
     .filter((entry) => Number(entry.weekday) === weekday)
     .sort((a, b) => a.startTime.localeCompare(b.startTime));
 }
 
 function getExamDaysRemaining(dateValue) {
-  const today = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`);
-  const examDate = new Date(`${dateValue}T00:00:00.000Z`);
+  if (!dateValue) return 0;
+  const todayStr = applicationDateString();
+  const today = new Date(`${todayStr}T00:00:00.000Z`);
+  const dateStr = dateValue instanceof Date
+    ? dateValue.toISOString().slice(0, 10)
+    : String(dateValue).slice(0, 10);
+  const examDate = new Date(`${dateStr}T00:00:00.000Z`);
+  if (Number.isNaN(examDate.getTime())) return 0;
   return Math.max(0, Math.ceil((examDate - today) / 86400000));
 }
 
@@ -67,7 +84,7 @@ function buildAttendanceAnswer(subject, summary, target) {
 }
 
 async function buildContext(userId) {
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = applicationDateString();
   const [subjects, timetable, attendanceRecords, exams, syllabusTopics, studySessions, tasks, user] = await Promise.all([
     Subject.find({ user: userId }).sort({ name: 1 }).lean(),
     TimetableEntry.find({ user: userId }).populate('subject', 'name code').sort({ weekday: 1, startTime: 1 }).lean(),
@@ -102,7 +119,6 @@ async function askAcademicQuestion({ userId, question }) {
 
   const context = await buildContext(userId);
   const text = question.trim();
-  const normalized = normalize(text);
 
   if (/(how do i use acadova|what can you do|how to use|help me)/i.test(text)) {
     return {
@@ -112,8 +128,135 @@ async function askAcademicQuestion({ userId, question }) {
     };
   }
 
+  // 1. Study Plan (Check before general timetable so "what should I study today" matches study plan)
+  if (/(study plan|study today|today.*study|study session|sessions today|what should i study|what to study)/i.test(text)) {
+    if (!context.studySessions.length) {
+      return {
+        intent: 'study-plan',
+        answer: 'There are no study sessions planned for today yet. Open the Study Planner to create a plan based on your upcoming exams and syllabus.',
+        actions: [{ label: 'Open Study Planner', to: '/study-planner' }],
+      };
+    }
+    const sessionsText = context.studySessions.map((session) => {
+      const subject = subjectLabel(session.subject);
+      const examName = session.exam ? session.exam.title : 'study block';
+      const startMin = toMinutes(session.startTime);
+      const duration = Number(session.durationMinutes) || 45;
+      const endTime = fromMinutes(startMin + duration);
+      return `${subject} · ${session.startTime}–${endTime} · ${examName}`;
+    }).join('; ');
+    return {
+      intent: 'study-plan',
+      answer: `Today's study plan includes: ${sessionsText}.`,
+      actions: [{ label: 'Open Study Planner', to: '/study-planner' }],
+    };
+  }
+
+  // 2. Timetable / Schedule Queries
+  if (
+    /(today.*(class|classes|timetable|schedule)|classes.*today|timetable.*today|today's classes)/i.test(text)
+    || (/(class|classes|timetable|schedule)/i.test(text) && /(today|todays|now)/i.test(text))
+    || (/(what classes|classes do i have|show.*timetable|view.*timetable|my schedule|my timetable|what is my timetable)/i.test(text))
+    || (/classes.*(attend|have).*today/i.test(text))
+  ) {
+    const todayEntries = getTodayClasses(context.timetable);
+    if (!todayEntries.length) {
+      return {
+        intent: 'timetable',
+        answer: 'You do not have any classes scheduled for today. You can add or review your timetable from the timetable page.',
+        actions: [{ label: 'Open timetable', to: '/timetable' }],
+      };
+    }
+    const list = todayEntries.map((entry) => `${entry.subject?.name || 'Subject'} · ${entry.startTime}–${entry.endTime}${entry.location ? ` at ${entry.location}` : ''}`).join('; ');
+    return {
+      intent: 'timetable',
+      answer: `Your classes today are: ${list}.`,
+      actions: [{ label: 'Open timetable', to: '/timetable' }],
+    };
+  }
+
+  // 2. Exam Queries
+  if (/(exam|upcoming examination|coming up next|next exam|examination schedule)/i.test(text)) {
+    const todayStr = applicationDateString();
+    const upcomingExams = context.exams.filter((exam) => {
+      const dStr = exam.date instanceof Date ? exam.date.toISOString().slice(0, 10) : String(exam.date).slice(0, 10);
+      return dStr >= todayStr;
+    });
+    if (!upcomingExams.length) {
+      return {
+        intent: 'exams',
+        answer: 'You do not have any upcoming exams configured yet. Add exam data to the exam page to track them here.',
+        actions: [{ label: 'Open exams', to: '/exams' }],
+      };
+    }
+    const nextExam = upcomingExams[0];
+    const nextDays = getExamDaysRemaining(nextExam.date);
+    const examList = upcomingExams.slice(0, 3).map((exam) => `${exam.subject?.name || 'Subject'} · ${exam.title} · ${new Date(exam.date).toLocaleDateString(undefined, { dateStyle: 'medium' })} (${getExamDaysRemaining(exam.date)} days left)`).join('; ');
+    return {
+      intent: 'exams',
+      answer: `Your next exam is ${nextExam.title} for ${subjectLabel(nextExam.subject)} on ${new Date(nextExam.date).toLocaleDateString(undefined, { dateStyle: 'medium' })}. That is ${nextDays} day${nextDays === 1 ? '' : 's'} away. Upcoming exams: ${examList}.`,
+      actions: [{ label: 'Open exams', to: '/exams' }],
+    };
+  }
+
+  // 3. Tasks & Assignments
+  if (/(assignment|assignments|task|tasks|deadline|due|homework|to-do|todo)/i.test(text)) {
+    if (!context.tasks.length) {
+      return {
+        intent: 'tasks',
+        answer: 'There are no pending assignments or tasks right now. Add one under the organizer to track deadlines.',
+        actions: [{ label: 'Open organizer', to: '/organizer' }],
+      };
+    }
+    const upcomingTasks = context.tasks.slice(0, 3).map((task) => `${task.title} (due ${task.dueDate}${task.dueTime ? ` at ${task.dueTime}` : ''})`).join('; ');
+    return {
+      intent: 'tasks',
+      answer: `You have ${context.tasks.length} pending assignment${context.tasks.length === 1 ? '' : 's'}: ${upcomingTasks}.`,
+      actions: [{ label: 'Open organizer', to: '/organizer' }],
+    };
+  }
+
+  // 4. Syllabus Progress
+  if (/(syllabus|topic|progress|completed|what have i studied|study progress)/i.test(text)) {
+    if (!context.syllabusTopics.length) {
+      return {
+        intent: 'syllabus',
+        answer: 'You do not have any syllabus topics configured yet. Add topics under the syllabus page to track your progress.',
+        actions: [{ label: 'Open syllabus', to: '/syllabus' }],
+      };
+    }
+    const bySubject = new Map();
+    for (const topic of context.syllabusTopics) {
+      const key = String(topic.subject?._id || topic.subject);
+      const existing = bySubject.get(key) || { subject: topic.subject, total: 0, completed: 0 };
+      existing.total += 1;
+      if (topic.completed || topic.progress === 'completed') existing.completed += 1;
+      bySubject.set(key, existing);
+    }
+    const subjectProgress = [...bySubject.values()].map((entry) => {
+      const name = subjectLabel(entry.subject);
+      const percent = entry.total ? Math.round((entry.completed / entry.total) * 100) : 0;
+      return `${name}: ${percent}% complete (${entry.completed}/${entry.total})`;
+    }).join('; ');
+    return {
+      intent: 'syllabus',
+      answer: `Your syllabus progress is: ${subjectProgress}.`,
+      actions: [{ label: 'Open syllabus', to: '/syllabus' }],
+    };
+  }
+
+  // 6. Notes Queries
+  if (/\b(?:personal notes?|my notes?|notes)\b/i.test(text)) {
+    return {
+      intent: 'notes',
+      answer: 'You can keep personal notes in your Organizer tasks and descriptions, on individual attendance records, and alongside exam details. Check the Organizer for your task notes.',
+      actions: [{ label: 'Open Organizer', to: '/organizer' }, { label: 'Open Exams', to: '/exams' }],
+    };
+  }
+
+  // 7. Attendance Queries
   const subjectMatch = findSubjectMatch(text, context.subjects);
-  if ((/(attendance|attend|miss|target|75|80)/i.test(text) && !/(how do i use acadova|what can you do|how to use|help me)/i.test(text))) {
+  if (/(attendance|attend|miss|target|75|80|recover|bunk)/i.test(text)) {
     if (!context.subjects.length) {
       return {
         intent: 'attendance',
@@ -180,106 +323,6 @@ async function askAcademicQuestion({ userId, question }) {
       intent: 'attendance',
       answer: `${subjectLabel(selectedSubject)} attendance is ${formatPercentage(summary.percentage)} (${summary.attended} attended, ${summary.missed} missed, ${summary.conducted} total classes recorded). ${attendanceInsight(summary).warning ? ` ${attendanceInsight(summary).warning}` : ''}`.trim(),
       actions: [{ label: 'View attendance', to: '/attendance' }],
-    };
-  }
-
-  if (/(today.*(class|timetable|schedule)|classes.*today|what.*today|timetable.*today|today's classes)/i.test(text) || (/(class|timetable|schedule)/i.test(text) && /(today|todays)/i.test(text))) {
-    const todayEntries = getTodayClasses(context.timetable);
-    if (!todayEntries.length) {
-      return {
-        intent: 'timetable',
-        answer: 'You do not have any classes scheduled for today. You can add or review your timetable from the timetable page.',
-        actions: [{ label: 'Open timetable', to: '/timetable' }],
-      };
-    }
-    const list = todayEntries.map((entry) => `${entry.subject?.name || 'Subject'} · ${entry.startTime}–${entry.endTime}${entry.location ? ` at ${entry.location}` : ''}`).join('; ');
-    return {
-      intent: 'timetable',
-      answer: `Your classes today are: ${list}.`,
-      actions: [{ label: 'Open timetable', to: '/timetable' }],
-    };
-  }
-
-  if (/(exam|upcoming examination|coming up next|next exam)/i.test(text)) {
-    const upcomingExams = context.exams.filter((exam) => new Date(exam.date) >= new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`));
-    if (!upcomingExams.length) {
-      return {
-        intent: 'exams',
-        answer: 'You do not have any upcoming exams configured yet. Add exam data to the exam page to track them here.',
-        actions: [{ label: 'Open exams', to: '/exams' }],
-      };
-    }
-    const nextExam = upcomingExams[0];
-    const nextDays = getExamDaysRemaining(nextExam.date);
-    const examList = upcomingExams.slice(0, 3).map((exam) => `${exam.subject?.name || 'Subject'} · ${exam.title} · ${new Date(exam.date).toLocaleDateString(undefined, { dateStyle: 'medium' })} (${getExamDaysRemaining(exam.date)} days left)`).join('; ');
-    return {
-      intent: 'exams',
-      answer: `Your next exam is ${nextExam.title} for ${subjectLabel(nextExam.subject)} on ${new Date(nextExam.date).toLocaleDateString(undefined, { dateStyle: 'medium' })}. That is ${nextDays} day${nextDays === 1 ? '' : 's'} away. Upcoming exams: ${examList}.`,
-      actions: [{ label: 'Open exams', to: '/exams' }],
-    };
-  }
-
-  if (/(assignment|assignments|task|tasks|deadline|due|homework)/i.test(text)) {
-    if (!context.tasks.length) {
-      return {
-        intent: 'tasks',
-        answer: 'There are no pending assignments or tasks right now. Add one under the organizer to track deadlines.',
-        actions: [{ label: 'Open organizer', to: '/organizer' }],
-      };
-    }
-    const upcomingTasks = context.tasks.slice(0, 3).map((task) => `${task.title} (due ${task.dueDate}${task.dueTime ? ` at ${task.dueTime}` : ''})`).join('; ');
-    return {
-      intent: 'tasks',
-      answer: `You have ${context.tasks.length} pending assignment${context.tasks.length === 1 ? '' : 's'}: ${upcomingTasks}.`,
-      actions: [{ label: 'Open organizer', to: '/organizer' }],
-    };
-  }
-
-  if (/(syllabus|topic|progress|completed|what have i studied|study progress)/i.test(text)) {
-    if (!context.syllabusTopics.length) {
-      return {
-        intent: 'syllabus',
-        answer: 'You do not have any syllabus topics configured yet. Add topics under the syllabus page to track your progress.',
-        actions: [{ label: 'Open syllabus', to: '/syllabus' }],
-      };
-    }
-    const bySubject = new Map();
-    for (const topic of context.syllabusTopics) {
-      const key = String(topic.subject?._id || topic.subject);
-      const existing = bySubject.get(key) || { subject: topic.subject, total: 0, completed: 0 };
-      existing.total += 1;
-      if (topic.completed || topic.progress === 'completed') existing.completed += 1;
-      bySubject.set(key, existing);
-    }
-    const subjectProgress = [...bySubject.values()].map((entry) => {
-      const name = subjectLabel(entry.subject);
-      const percent = entry.total ? Math.round((entry.completed / entry.total) * 100) : 0;
-      return `${name}: ${percent}% complete (${entry.completed}/${entry.total})`;
-    }).join('; ');
-    return {
-      intent: 'syllabus',
-      answer: `Your syllabus progress is: ${subjectProgress}.`,
-      actions: [{ label: 'Open syllabus', to: '/syllabus' }],
-    };
-  }
-
-  if (/(study plan|study today|today.*study|study session|what should i study|what should i do today)/i.test(text)) {
-    if (!context.studySessions.length) {
-      return {
-        intent: 'study-plan',
-        answer: 'There are no study sessions planned for today yet. Open the Study Planner to create a plan based on your upcoming exams and syllabus.',
-        actions: [{ label: 'Open Study Planner', to: '/study-planner' }],
-      };
-    }
-    const sessionsText = context.studySessions.map((session) => {
-      const subject = subjectLabel(session.subject);
-      const examName = session.exam ? session.exam.title : 'study block';
-      return `${subject} · ${session.startTime}–${session.endTime} · ${examName}`;
-    }).join('; ');
-    return {
-      intent: 'study-plan',
-      answer: `Today's study plan includes: ${sessionsText}.`,
-      actions: [{ label: 'Open Study Planner', to: '/study-planner' }],
     };
   }
 

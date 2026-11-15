@@ -3,14 +3,14 @@ const { after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 const sharp = require('sharp');
+const ExcelJS = require('exceljs');
 const { parseTimetable, normalizeTime } = require('../services/documents/parseTimetable');
 const {
   validateContent, MAX_BYTES, imageDimensions, scoreOcrResult, selectBestOcrResult, preprocessImageCandidates,
 } = require('../services/documents/extractText');
 const { parseExams, parseSyllabus, parseCalendar, dateValue } = require('../services/documents/parseAcademicDocs');
-const { extractText, shutdownOcrWorker } = require('../services/documents/extractText');
+const { extractText, extractPdf, shutdownOcrWorker } = require('../services/documents/extractText');
 
 after(shutdownOcrWorker);
 
@@ -335,12 +335,47 @@ test('decodes a valid WebP upload with the local OCR pipeline', async () => {
   await assert.rejects(() => extractText(webp, 'image/webp', 'pixel.webp'), /No readable text/i);
 });
 
-test('keeps searchable PDF extraction working through pdftotext', async (context) => {
-  const command = process.env.PDFTOTEXT_PATH || 'pdftotext';
-  if (spawnSync(command, ['-v'], { windowsHide: true }).error) return context.skip('Poppler pdftotext is not installed in this environment.');
-  const extracted = await extractText(makeTextPdf('Algorithms Monday 09:00 10:00'), 'application/pdf', 'schedule.pdf');
+test('extracts positioned selectable text directly from digital PDFs', async () => {
+  const extracted = await extractText(makeTextPdf('Monday Algorithms 09:00 - 10:00'), 'application/pdf', 'schedule.pdf');
   assert.equal(extracted.method, 'pdf-text');
-  assert.match(extracted.text, /Algorithms Monday 09:00 10:00/);
+  assert.match(extracted.text, /Monday Algorithms 09:00 - 10:00/);
+  assert.ok(extracted.words.length > 0);
+  assert.ok(extracted.words.every((word) => Number.isFinite(word.bbox.x0) && Number.isFinite(word.bbox.y0)));
+  const [row] = parseTimetable(extracted.text, extracted.sourceType, extracted.words);
+  assert.deepEqual([row.weekday, row.subjectName, row.startTime, row.endTime], [0, 'Algorithms', '09:00', '10:00']);
+});
+
+test('uses local OCR for scanned PDF pages without selectable text', async () => {
+  const page = {
+    getViewport: () => ({ width: 100, height: 100 }),
+    getTextContent: async () => ({ items: [] }),
+  };
+  const extracted = await extractPdf(Buffer.from('%PDF-1.4 fixture'), {
+    loadDocument: async () => ({ numPages: 1, getPage: async () => page }),
+    renderPage: async () => Buffer.from('local-page-image'),
+    worker: {},
+    recognizeTimetableImage: async () => ({
+      text: 'Monday Algorithms 09:00 - 10:00',
+      words: [{ text: 'Monday', confidence: 90, bbox: { x0: 0, y0: 0, x1: 40, y1: 10 } }],
+    }),
+  });
+  assert.equal(extracted.method, 'pdf-local-ocr');
+  assert.match(extracted.text, /Monday Algorithms/);
+  assert.equal(extracted.words[0].text, 'Monday');
+});
+
+test('extracts XLSX worksheets into the existing CSV timetable parser', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet('Timetable');
+  worksheet.addRow(['subject', 'subject_code', 'day', 'start_time', 'end_time', 'faculty', 'location', 'session_type']);
+  worksheet.addRow(['Networks, "Advanced"', 'CS301', 'Tue.', '09:00', '10:00', 'Dr Rao', 'Room 12', 'Lecture']);
+  const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+  const extracted = await extractText(buffer, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'schedule.xlsx');
+  assert.equal(extracted.method, 'xlsx-spreadsheet');
+  const [row] = parseTimetable(extracted.text, extracted.sourceType);
+  assert.deepEqual([row.subjectName, row.subjectCode, row.weekday, row.startTime, row.endTime, row.teacher, row.location, row.sessionType], [
+    'Networks, "Advanced"', 'CS301', 1, '09:00', '10:00', 'Dr Rao', 'Room 12', 'lecture',
+  ]);
 });
 
 test('normalizes 24-hour and meridiem clock values', () => {
@@ -351,7 +386,7 @@ test('normalizes 24-hour and meridiem clock values', () => {
 
 test('rejects empty, oversized, binary text, and mismatched declared file content', () => {
   assert.throws(() => validateContent(Buffer.alloc(0), 'text/csv'), /non-empty/);
-  assert.throws(() => validateContent(Buffer.alloc(MAX_BYTES + 1, 65), 'text/plain'), /12 MB/);
+  assert.throws(() => validateContent(Buffer.alloc(MAX_BYTES + 1, 65), 'text/plain'), /25 MB/);
   assert.throws(() => validateContent(Buffer.from([0, 1, 2]), 'text/plain'), /CSV or plain text/);
   const pdf = Buffer.from('%PDF-1.4 sample');
   assert.throws(() => validateContent(pdf, 'image/png'), /does not match/);

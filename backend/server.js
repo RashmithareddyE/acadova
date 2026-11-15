@@ -4,16 +4,25 @@ const connectDB = require('./config/db');
 const mongoose = require('mongoose');
 
 async function start() {
-  try {
-    await connectDB();
-  } catch (err) {
-    console.error(`Could not connect to MongoDB: ${err.message}`);
-    process.exit(1);
-  }
-
   const server = app.listen(env.port, () => {
     console.log(`Acadova API listening on port ${env.port} (${env.nodeEnv})`);
   });
+
+  try {
+    await connectDB();
+  } catch (err) {
+    console.error(`Could not connect to MongoDB at ${env.mongoUri}: ${err.message}`);
+    console.log('Background reconnection scheduled every 5s...');
+    const retryInterval = setInterval(async () => {
+      try {
+        await connectDB();
+        clearInterval(retryInterval);
+      } catch {
+        // continue waiting
+      }
+    }, 5000);
+    retryInterval.unref();
+  }
 
   const shutdown = (signal) => {
     console.log(`${signal} received, shutting down...`);

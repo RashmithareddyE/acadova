@@ -6,6 +6,7 @@ const router = express.Router();
 router.use(protect);
 router.get('/target', controller.getTarget);
 router.put('/target', controller.updateTarget);
+router.put('/baseline', controller.setBaseline);
 router.get('/summary', controller.getSummaries);
 router.get('/today', controller.getTodayDashboard);
 router.get('/schedule', controller.getSchedule);

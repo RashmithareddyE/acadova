@@ -25,4 +25,16 @@ function weekdayForDate(value) {
   return date ? new Date(`${date}T00:00:00.000Z`).getUTCDay() : null;
 }
 
-module.exports = { APP_TIME_ZONE, applicationDateString, dateOnlyString, weekdayForDate };
+function timetableWeekdayForDate(value) {
+  const date = dateOnlyString(value);
+  if (!date) return null;
+  const day = new Date(`${date}T00:00:00.000Z`).getUTCDay();
+  return (day + 6) % 7;
+}
+
+function applicationWeekday(now = new Date()) {
+  const today = applicationDateString(now);
+  return timetableWeekdayForDate(today);
+}
+
+module.exports = { APP_TIME_ZONE, applicationDateString, dateOnlyString, weekdayForDate, timetableWeekdayForDate, applicationWeekday };

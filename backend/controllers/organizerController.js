@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const OrganizerTask = require('../models/OrganizerTask');
 const AppError = require('../utils/AppError');
 const asyncHandler = require('../utils/asyncHandler');
+const { applicationDateString } = require('../utils/applicationDate');
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -52,7 +53,7 @@ function validId(value) {
 exports.listTasks = asyncHandler(async (req, res) => {
   const view = req.query.view || 'all';
   if (!VIEWS.includes(view)) throw new AppError(400, 'Choose All, Today, Upcoming, Overdue, or Completed tasks.');
-  const date = req.query.date || new Date().toISOString().slice(0, 10);
+  const date = req.query.date || applicationDateString();
   if (!validDate(date)) throw new AppError(400, 'Enter a valid task date (YYYY-MM-DD).');
 
   if (view === 'dashboard') {

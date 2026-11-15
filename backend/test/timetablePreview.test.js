@@ -49,3 +49,33 @@ test('surfaces local OCR failures so the user can choose manual entry', async ()
     },
   }), (error) => error.statusCode === 503 && /Local OCR could not start/.test(error.message));
 });
+
+test('exposes normalized CSV and extraction warnings before any persistence call', async () => {
+  const result = await buildTimetablePreview(pngHeader(), 'image/png', 'schedule.png', {
+    extractText: async () => ({
+      text: 'Monday Mathematics',
+      sourceType: 'image/png',
+      method: 'tesseract.js-local-ocr',
+      words: [],
+    }),
+    parseTimetable: () => [{
+      subjectName: 'Mathematics',
+      subjectCode: 'MA301',
+      weekday: 0,
+      startTime: '09:00',
+      endTime: '10:00',
+      location: '',
+      teacher: '',
+      sessionType: '',
+      section: '',
+      sourceLine: 1,
+      issues: ['OCR confidence is low. Verify this row against the image.'],
+    }],
+  });
+
+  assert.equal(result.csvColumns.join(','), 'subject,subject_code,day,start_time,end_time,faculty,location,session_type');
+  assert.ok(result.csv.startsWith('\uFEFFsubject,subject_code,day,start_time,end_time,faculty,location,session_type'));
+  assert.match(result.csv, /Mathematics,MA301,Monday,09:00,10:00,,,/);
+  assert.equal(result.extraction.incomplete, 1);
+  assert.ok(result.extraction.warnings.length > 0);
+});

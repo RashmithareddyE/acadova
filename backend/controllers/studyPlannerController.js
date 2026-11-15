@@ -167,7 +167,8 @@ exports.generate = asyncHandler(async (req, res) => {
 async function assertSessionSlot({ session, date, startTime, durationMinutes, preferences, userId }) {
   const dateValue = DATE.test(date || '') ? new Date(`${date}T00:00:00.000Z`) : null;
   if (!dateValue || Number.isNaN(dateValue.getTime()) || dateValue.toISOString().slice(0, 10) !== date || !TIME.test(startTime || '') || !Number.isInteger(durationMinutes) || durationMinutes < 15 || durationMinutes > 180) throw new AppError(400, 'Choose a valid date, start time, and duration.');
-  if (date < todayDate() || date >= dateString(new Date(session.examDate))) throw new AppError(400, 'Study sessions must be scheduled from today up to the day before the examination.');
+  const examIso = session.examDate ? dateString(new Date(session.examDate)) : null;
+  if (date < todayDate() || (examIso && date >= examIso)) throw new AppError(400, 'Study sessions must be scheduled from today up to the day before the examination.');
   if (!(preferences.studyDays || []).includes(WEEKDAY(date))) throw new AppError(400, 'Choose one of your configured study days.');
   const start = toMinutes(preferences.studyStartTime); const end = toMinutes(preferences.studyEndTime); const begins = toMinutes(startTime);
   if (begins < start || begins + durationMinutes > end || begins + durationMinutes > 1440) throw new AppError(400, 'The session must fit within your preferred study window.');
@@ -202,11 +203,17 @@ exports.updateSession = asyncHandler(async (req, res) => {
   if (status === 'completed' && date > todayDate()) throw new AppError(400, 'A future study session cannot be marked completed.');
   const preferences = await StudyPreferences.findOne({ user: req.user.id }).lean();
   if (!preferences) throw new AppError(400, 'Study preferences are unavailable.');
-  if (status === 'planned' || date !== session.date || startTime !== session.startTime || durationMinutes !== session.durationMinutes) {
-    await assertSessionSlot({ session: { ...session.toObject(), examDate: session.exam.date }, date, startTime, durationMinutes, preferences, userId: req.user.id });
+  const examDate = session.exam?.date || null;
+  if (status === 'planned' && (session.status !== 'planned' || date !== session.date || startTime !== session.startTime || durationMinutes !== session.durationMinutes)) {
+    await assertSessionSlot({ session: { ...session.toObject(), examDate }, date, startTime, durationMinutes, preferences, userId: req.user.id });
   }
   session.status = status; session.date = date; session.startTime = startTime; session.durationMinutes = durationMinutes;
-  await session.save();
+  try {
+    await session.save();
+  } catch (err) {
+    if (err.code === 11000) throw new AppError(409, 'A study session for this topic is already scheduled on that date. Choose a different date.');
+    throw err;
+  }
   await session.populate([{ path: 'exam', select: 'title date type' }, { path: 'subject', select: 'name code' }, { path: 'topic', select: 'unit topic progress completed' }]);
   res.json({ success: true, session });
 });

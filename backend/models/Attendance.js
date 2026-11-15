@@ -15,4 +15,9 @@ attendanceSchema.index(
   { unique: true, partialFilterExpression: { timetableEntry: { $type: 'objectId' } } }
 );
 
+attendanceSchema.index(
+  { user: 1, subject: 1, date: 1 },
+  { unique: true, partialFilterExpression: { timetableEntry: null } }
+);
+
 module.exports = mongoose.model('Attendance', attendanceSchema);

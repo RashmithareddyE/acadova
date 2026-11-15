@@ -9,8 +9,15 @@ const subjectSchema = new mongoose.Schema({
   teacher: { type: String, trim: true, maxlength: 100, default: '' },
   credits: { type: Number, required: true, min: 0, max: 60 },
   description: { type: String, trim: true, maxlength: 2000, default: '' },
+  initialConducted: { type: Number, min: 0, default: 0 },
+  initialAttended: { type: Number, min: 0, default: 0 },
 }, { timestamps: true });
 subjectSchema.index({ user: 1, code: 1 }, { unique: true });
+subjectSchema.pre('validate', function validateBaseline() {
+  if (this.initialAttended != null && this.initialConducted != null && this.initialAttended > this.initialConducted) {
+    this.invalidate('initialAttended', 'Initial attended classes cannot exceed initial conducted classes.');
+  }
+});
 
 const timetableSchema = new mongoose.Schema({
   ...ownership,
@@ -20,7 +27,12 @@ const timetableSchema = new mongoose.Schema({
   endTime: { type: String, required: true, match: /^([01]\d|2[0-3]):[0-5]\d$/ },
   location: { type: String, trim: true, maxlength: 120, default: '' },
   teacher: { type: String, trim: true, maxlength: 100, default: '' },
-  sessionType: { type: String, enum: ['', 'lecture', 'lab', 'practical', 'tutorial', 'other'], default: '' },
+  sessionType: {
+    type: String,
+    enum: ['', 'lecture', 'lab', 'practical', 'tutorial', 'other'],
+    default: '',
+    set: (v) => (v == null ? '' : String(v).trim().toLowerCase()),
+  },
 }, { timestamps: true });
 timetableSchema.pre('validate', function validateRange() {
   if (this.startTime && this.endTime && this.startTime >= this.endTime) this.invalidate('endTime', 'End time must be after start time.');
@@ -29,7 +41,22 @@ timetableSchema.pre('validate', function validateRange() {
 const calendarSchema = new mongoose.Schema({
   ...ownership,
   title: { type: String, required: true, trim: true, maxlength: 160 },
-  type: { type: String, required: true, enum: ['event', 'holiday', 'deadline', 'college'] },
+  type: {
+    type: String,
+    required: true,
+    enum: [
+      'event',
+      'holiday',
+      'deadline',
+      'college',
+      'working-saturday',
+      'special-working-day',
+      'cancelled-class',
+      'semester-start',
+      'semester-end',
+      'exam',
+    ],
+  },
   date: { type: Date, required: true },
   endDate: { type: Date, default: null },
   description: { type: String, trim: true, maxlength: 2000, default: '' },

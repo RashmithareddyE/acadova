@@ -88,3 +88,46 @@ test('exam schema validates paired times and chronological ranges', async () => 
   const reversed = new Exam({ ...base, startTime: '11:00', endTime: '10:00' });
   await assert.rejects(reversed.validate(), /End time must be after start time/);
 });
+
+test('timetable entry allows empty sessionType, null sessionType, and normalizes it', async (t) => {
+  const { TimetableEntry } = require('../models/Academic');
+  const originalSubjectExists = Subject.exists;
+  const originalTimetableExists = TimetableEntry.exists;
+  const originalCreate = TimetableEntry.create;
+  t.after(() => {
+    Subject.exists = originalSubjectExists;
+    TimetableEntry.exists = originalTimetableExists;
+    TimetableEntry.create = originalCreate;
+  });
+  Subject.exists = async () => true;
+  TimetableEntry.exists = async () => false;
+
+  const inserted = [];
+  TimetableEntry.create = async (values) => {
+    const doc = new TimetableEntry(values);
+    await doc.validate();
+    inserted.push(doc.toObject());
+    return { ...values, async populate() { return this; } };
+  };
+
+  // Test with empty string
+  await invoke(academicController.controller('timetable').create, {
+    user: { id: userId },
+    body: { subject: subjectId, weekday: 1, startTime: '09:00', endTime: '10:00', sessionType: '' },
+  });
+  assert.equal(inserted.at(-1).sessionType, '');
+
+  // Test with null sessionType
+  await invoke(academicController.controller('timetable').create, {
+    user: { id: userId },
+    body: { subject: subjectId, weekday: 2, startTime: '10:00', endTime: '11:00', sessionType: null },
+  });
+  assert.equal(inserted.at(-1).sessionType, '');
+
+  // Test with omitted sessionType
+  await invoke(academicController.controller('timetable').create, {
+    user: { id: userId },
+    body: { subject: subjectId, weekday: 3, startTime: '11:00', endTime: '12:00' },
+  });
+  assert.equal(inserted.at(-1).sessionType, '');
+});

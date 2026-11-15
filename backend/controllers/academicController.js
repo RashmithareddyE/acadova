@@ -17,7 +17,7 @@ const definitions = {
 function cleanPayload(resource, body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new AppError(400, 'Request body must be an object.');
   const fields = {
-    subjects: ['name', 'code', 'teacher', 'credits', 'description'],
+    subjects: ['name', 'code', 'teacher', 'credits', 'description', 'initialConducted', 'initialAttended'],
     timetable: ['subject', 'weekday', 'startTime', 'endTime', 'location', 'teacher', 'sessionType'],
     calendar: ['title', 'type', 'date', 'endDate', 'description'],
     exams: ['title', 'type', 'subject', 'date', 'startTime', 'endTime', 'venue', 'notes'],
@@ -26,12 +26,41 @@ function cleanPayload(resource, body) {
   if (!fields) throw new AppError(404, 'Academic resource not found.');
   const payload = {};
   fields.forEach((field) => { if (body[field] !== undefined) payload[field] = body[field]; });
+  if (resource === 'subjects') {
+    if (body.percentage !== undefined && body.percentage !== '') {
+      const p = Number(body.percentage);
+      if (Number.isNaN(p) || p < 0 || p > 100) {
+        throw new AppError(400, 'Attendance percentage must be between 0 and 100.', { percentage: 'Enter a valid percentage (0–100).' });
+      }
+      if (payload.initialConducted !== undefined && payload.initialConducted !== '') {
+        const cond = Number(payload.initialConducted) || 0;
+        payload.initialConducted = cond;
+        payload.initialAttended = Math.round((p / 100) * cond);
+      } else if (payload.initialAttended === undefined) {
+        payload.initialConducted = 100;
+        payload.initialAttended = Math.round(p);
+      }
+    }
+    if (payload.initialConducted !== undefined) payload.initialConducted = Number(payload.initialConducted) || 0;
+    if (payload.initialAttended !== undefined) payload.initialAttended = Number(payload.initialAttended) || 0;
+    if (payload.initialAttended > payload.initialConducted) {
+      throw new AppError(400, 'Initial attended classes cannot exceed initial conducted classes.', {
+        initialAttended: 'Attended classes cannot exceed conducted classes.',
+      });
+    }
+  }
   if (resource === 'syllabus') {
     if (payload.progress !== undefined && !['not-started', 'in-progress', 'completed'].includes(payload.progress)) {
       throw new AppError(400, 'Choose Not Started, In Progress, or Completed topic progress.');
     }
     if (payload.progress !== undefined) payload.completed = payload.progress === 'completed';
     else if (payload.completed !== undefined) payload.progress = payload.completed ? 'completed' : 'not-started';
+  }
+  if (resource === 'timetable') {
+    if (payload.sessionType == null) payload.sessionType = '';
+    else payload.sessionType = String(payload.sessionType).trim().toLowerCase();
+    if (payload.location == null) payload.location = '';
+    if (payload.teacher == null) payload.teacher = '';
   }
   for (const key of ['subject']) {
     if (payload[key] !== undefined && !mongoose.isValidObjectId(payload[key])) throw new AppError(400, `Invalid ${key} identifier.`, { [key]: `Invalid ${key} identifier.` });

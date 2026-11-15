@@ -5,7 +5,7 @@ const User = require('../models/User');
 const { Subject, TimetableEntry, CalendarEvent, Exam } = require('../models/Academic');
 const AppError = require('../utils/AppError');
 const asyncHandler = require('../utils/asyncHandler');
-const { attendanceInsight, projectAttendance, summarizeStatuses } = require('../services/attendanceCalculator');
+const { attendanceInsight, projectAttendance, summarizeStatuses, projectSemesterAttendance } = require('../services/attendanceCalculator');
 const { buildTodayDashboard } = require('../services/todayDashboard');
 const { applicationDateString } = require('../utils/applicationDate');
 
@@ -77,7 +77,12 @@ exports.createRecord = asyncHandler(async (req, res) => {
   let record;
   try { record = await Attendance.create({ ...values, user: req.user.id }); }
   catch (err) {
-    if (err.code === 11000) throw new AppError(409, 'Attendance is already recorded for this scheduled class on that date. Edit the existing record instead.');
+    if (err.code === 11000) {
+      const msg = values.timetableEntry
+        ? 'Attendance is already recorded for this scheduled class on that date. Edit the existing record instead.'
+        : 'Attendance is already recorded for this subject on that date. Edit the existing record instead.';
+      throw new AppError(409, msg);
+    }
     throw err;
   }
   await record.populate([{ path: 'subject', select: 'name code' }, { path: 'timetableEntry', select: 'weekday startTime endTime location' }]);
@@ -91,7 +96,17 @@ exports.updateRecord = asyncHandler(async (req, res) => {
   const record = await Attendance.findOne({ _id: req.params.id, user: req.user.id });
   if (!record) throw new AppError(404, 'Attendance record not found.');
   Object.assign(record, values);
-  await record.save();
+  try {
+    await record.save();
+  } catch (err) {
+    if (err.code === 11000) {
+      const msg = values.timetableEntry
+        ? 'Attendance is already recorded for this scheduled class on that date. Edit the existing record instead.'
+        : 'Attendance is already recorded for this subject on that date. Edit the existing record instead.';
+      throw new AppError(409, msg);
+    }
+    throw err;
+  }
   await record.populate([{ path: 'subject', select: 'name code' }, { path: 'timetableEntry', select: 'weekday startTime endTime location' }]);
   res.json({ success: true, record });
 });
@@ -119,24 +134,61 @@ exports.updateTarget = asyncHandler(async (req, res) => {
 
 exports.getSummaries = asyncHandler(async (req, res) => {
   const target = (await User.findById(req.user.id).select('attendanceTarget'))?.attendanceTarget || 75;
-  const [subjects, records] = await Promise.all([
+  const [subjects, records, timetableEntries, calendarEvents, intentions] = await Promise.all([
     Subject.find({ user: req.user.id }).sort({ name: 1 }),
-    Attendance.find({ user: req.user.id }).select('subject status'),
+    Attendance.find({ user: req.user.id }).select('subject status date timetableEntry'),
+    TimetableEntry.find({ user: req.user.id }),
+    CalendarEvent.find({ user: req.user.id }),
+    ClassIntention.find({ user: req.user.id }),
   ]);
+  const currentDate = applicationDateString();
   const summaries = subjects.map((subject) => {
     const sessions = records.filter((record) => record.subject.toString() === subject._id.toString());
-    const actual = summarizeStatuses(sessions.map((record) => record.status), target);
+    const subjectIntentions = intentions.filter((intent) => {
+      const entry = timetableEntries.find((e) => e._id.toString() === intent.timetableEntry.toString());
+      return entry && entry.subject.toString() === subject._id.toString();
+    });
+    const projection = projectSemesterAttendance({
+      subject,
+      timetableEntries,
+      calendarEvents,
+      currentDate,
+      actualRecords: sessions,
+      intentions: subjectIntentions,
+      target,
+    });
     let status = 'no data';
-    if (actual.percentage !== null) {
-      if (actual.percentage < target) status = 'below target';
-      else if (actual.additionalAbsencesAllowed <= 2) status = 'at risk';
+    if (projection.percentage !== null) {
+      if (projection.percentage < target) status = 'below target';
+      else if (projection.additionalAbsencesAllowed <= 2) status = 'at risk';
       else status = 'safe';
     }
-    return { subject: { id: subject.id, name: subject.name, code: subject.code }, ...actual, ...attendanceInsight(actual), status };
+    return {
+      subject: {
+        id: subject.id,
+        name: subject.name,
+        code: subject.code,
+        initialConducted: subject.initialConducted || 0,
+        initialAttended: subject.initialAttended || 0,
+      },
+      ...projection,
+      ...attendanceInsight(projection),
+      status,
+    };
   });
   const present = summaries.reduce((sum, item) => sum + item.attended, 0);
   const conducted = summaries.reduce((sum, item) => sum + item.conducted, 0);
-  res.json({ success: true, target, overall: { conducted, attended: present, missed: conducted - present, percentage: conducted ? (present / conducted) * 100 : null }, summaries });
+  res.json({
+    success: true,
+    target,
+    overall: {
+      conducted,
+      attended: present,
+      missed: conducted - present,
+      percentage: conducted ? (present / conducted) * 100 : null,
+    },
+    summaries,
+  });
 });
 
 exports.getTodayDashboard = asyncHandler(async (req, res) => {
@@ -147,7 +199,7 @@ exports.getTodayDashboard = asyncHandler(async (req, res) => {
   const weekday = weekdayFor(date);
   const [user, entries, holiday, exams, subjects, records] = await Promise.all([
     User.findById(userId).select('attendanceTarget'),
-    TimetableEntry.find({ user: userId, weekday }).populate('subject', 'name code').sort({ startTime: 1 }),
+    TimetableEntry.find({ user: userId, weekday }).populate('subject', 'name code teacher').sort({ startTime: 1 }),
     CalendarEvent.findOne({
       user: userId,
       type: 'holiday',
@@ -226,14 +278,140 @@ exports.getSchedule = asyncHandler(async (req, res) => {
     date.setUTCDate(date.getUTCDate() + i);
     return date.toISOString().slice(0, 10);
   });
-  const entries = await TimetableEntry.find({ user: req.user.id, weekday: { $in: [...new Set(dates.map(weekdayFor))] } }).populate('subject', 'name code').sort({ startTime: 1 });
-  const records = await Attendance.find({ user: req.user.id, date: { $in: dates }, timetableEntry: { $in: entries.map((entry) => entry._id) } });
+
+  const [calendarEvents, allEntries, records] = await Promise.all([
+    CalendarEvent.find({ user: req.user.id }),
+    TimetableEntry.find({ user: req.user.id }).populate('subject', 'name code teacher').sort({ startTime: 1 }),
+    Attendance.find({ user: req.user.id, date: { $in: dates } }),
+  ]);
+
+  const semesterStartEvent = calendarEvents.find((e) => e.type === 'semester-start');
+  const semesterEndEvent = calendarEvents.find((e) => e.type === 'semester-end');
+  const semesterStartStr = semesterStartEvent ? new Date(semesterStartEvent.date).toISOString().slice(0, 10) : null;
+  const semesterEndStr = semesterEndEvent ? new Date(semesterEndEvent.date).toISOString().slice(0, 10) : null;
+
+  const holidays = calendarEvents.filter((e) => e.type === 'holiday').map((e) => {
+    const start = new Date(e.date).toISOString().slice(0, 10);
+    const end = e.endDate ? new Date(e.endDate).toISOString().slice(0, 10) : start;
+    return { title: e.title, start, end };
+  });
+
+  const cancelledSet = new Set(
+    calendarEvents.filter((e) => e.type === 'cancelled-class').map((e) => new Date(e.date).toISOString().slice(0, 10))
+  );
+
+  const workingSaturdays = new Map();
+  calendarEvents.filter((e) => e.type === 'working-saturday').forEach((e) => {
+    workingSaturdays.set(new Date(e.date).toISOString().slice(0, 10), e);
+  });
+
+  const specialWorkingDays = new Map();
+  calendarEvents.filter((e) => e.type === 'special-working-day').forEach((e) => {
+    specialWorkingDays.set(new Date(e.date).toISOString().slice(0, 10), e);
+  });
+
   const lookup = new Map(records.map((record) => [`${record.date}:${record.timetableEntry}`, record]));
-  const classes = dates.flatMap((date) => entries.filter((entry) => entry.weekday === weekdayFor(date)).map((entry) => {
-    const record = lookup.get(`${date}:${entry.id}`);
-    return { date, timetableEntry: entry, subject: entry.subject, record: record || null };
-  })).sort((a, b) => a.date.localeCompare(b.date) || a.timetableEntry.startTime.localeCompare(b.timetableEntry.startTime));
+
+  const classes = dates.flatMap((date) => {
+    // Exclude dates outside semester boundaries
+    if (semesterStartStr && date < semesterStartStr) return [];
+    if (semesterEndStr && date > semesterEndStr) return [];
+
+    // Exclude confirmed college holidays
+    const isHoliday = holidays.some((h) => date >= h.start && date <= h.end);
+    if (isHoliday) return [];
+
+    // Exclude cancelled class dates
+    if (cancelledSet.has(date)) return [];
+
+    const baseWeekday = weekdayFor(date);
+    let targetWeekday = baseWeekday;
+
+    // Working Saturday logic
+    if (baseWeekday === 5) {
+      const wsEvent = workingSaturdays.get(date);
+      if (wsEvent) {
+        const followMatch = wsEvent.description?.match(/\b(monday|tuesday|wednesday|thursday|friday)\b/i);
+        if (followMatch) {
+          targetWeekday = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'].indexOf(followMatch[1].toLowerCase());
+        }
+      }
+    } else if (baseWeekday === 6) {
+      // Sunday
+      const swEvent = specialWorkingDays.get(date);
+      if (!swEvent) return [];
+      const followMatch = swEvent.description?.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday)\b/i);
+      targetWeekday = followMatch
+        ? ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].indexOf(followMatch[1].toLowerCase())
+        : 0;
+    }
+
+    const dayEntries = allEntries.filter((entry) => entry.weekday === targetWeekday);
+    return dayEntries.map((entry) => {
+      const record = lookup.get(`${date}:${entry.id}`);
+      return {
+        date,
+        timetableEntry: entry,
+        subject: entry.subject,
+        record: record || null,
+        faculty: entry.teacher || entry.subject?.teacher || '',
+        location: entry.location || '',
+      };
+    });
+  }).sort((a, b) => a.date.localeCompare(b.date) || a.timetableEntry.startTime.localeCompare(b.timetableEntry.startTime));
+
   res.json({ success: true, classes });
+});
+
+exports.setBaseline = asyncHandler(async (req, res) => {
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    throw new AppError(400, 'Request body must be an object.');
+  }
+  const { subject: subjectId, initialConducted, initialAttended, percentage } = req.body;
+  objectId(subjectId, 'subject');
+  const subject = await Subject.findOne({ _id: subjectId, user: req.user.id });
+  if (!subject) throw new AppError(404, 'Subject not found in your account.');
+
+  let cond = subject.initialConducted || 0;
+  let att = subject.initialAttended || 0;
+
+  if (percentage !== undefined && percentage !== '') {
+    const p = Number(percentage);
+    if (Number.isNaN(p) || p < 0 || p > 100) {
+      throw new AppError(400, 'Attendance percentage must be between 0 and 100.', { percentage: 'Enter a valid percentage (0–100).' });
+    }
+    if (initialConducted !== undefined && initialConducted !== '') {
+      cond = Number(initialConducted);
+      if (!Number.isInteger(cond) || cond < 0) throw new AppError(400, 'Total conducted classes must be a whole non-negative number.');
+      att = Math.round((p / 100) * cond);
+    } else {
+      cond = 100;
+      att = Math.round(p);
+    }
+  } else {
+    if (initialConducted !== undefined) {
+      const c = Number(initialConducted);
+      if (!Number.isInteger(c) || c < 0) throw new AppError(400, 'Total conducted classes must be a whole non-negative number.');
+      cond = c;
+    }
+    if (initialAttended !== undefined) {
+      const a = Number(initialAttended);
+      if (!Number.isInteger(a) || a < 0) throw new AppError(400, 'Attended classes must be a whole non-negative number.');
+      att = a;
+    }
+  }
+
+  if (att > cond) {
+    throw new AppError(400, 'Attended classes cannot exceed total conducted classes.', {
+      initialAttended: 'Attended classes cannot exceed conducted classes.',
+    });
+  }
+
+  subject.initialConducted = cond;
+  subject.initialAttended = att;
+  await subject.save();
+
+  res.json({ success: true, subject });
 });
 
 exports.project = asyncHandler(async (req, res) => {
@@ -247,8 +425,9 @@ exports.project = asyncHandler(async (req, res) => {
     User.findById(req.user.id).select('attendanceTarget'),
     Attendance.find({ user: req.user.id, subject: subjectId, status: { $in: ['present', 'absent'] } }).select('status'),
   ]);
-  const actual = summarizeStatuses(records.map((record) => record.status), targetUser.attendanceTarget || 75);
-  res.json({ success: true, projection: projectAttendance(actual.attended, actual.missed, attend, miss, targetUser.attendanceTarget || 75) });
+  const baseline = { attended: subject.initialAttended || 0, conducted: subject.initialConducted || 0 };
+  const actual = summarizeStatuses(records.map((record) => record.status), targetUser?.attendanceTarget || 75, baseline);
+  res.json({ success: true, projection: projectAttendance(actual.attended, actual.missed, attend, miss, targetUser?.attendanceTarget || 75) });
 });
 
 exports._validation = { validDate, weekdayFor, dateBounds, payload };
