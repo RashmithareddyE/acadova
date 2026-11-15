@@ -29,6 +29,7 @@ export default function AttendancePage() {
   const [edit, setEdit] = useState(null);
   const [projectionInput, setProjectionInput] = useState({ subject: '', attend: 0, miss: 0 });
   const [projection, setProjection] = useState(null);
+  const [baselineInput, setBaselineInput] = useState({ subject: '', initialConducted: '', initialAttended: '', percentage: '' });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState('');
   const [error, setError] = useState('');
@@ -106,6 +107,31 @@ export default function AttendancePage() {
     finally { setSaving(''); }
   }
 
+  async function saveBaseline(event) {
+    event.preventDefault();
+    if (!baselineInput.subject) {
+      setError('Select a subject to initialize attendance baseline.');
+      return;
+    }
+    setSaving('baseline');
+    setError('');
+    setSuccess('');
+    try {
+      const payload = { subject: baselineInput.subject };
+      if (baselineInput.percentage !== '') payload.percentage = Number(baselineInput.percentage);
+      if (baselineInput.initialConducted !== '') payload.initialConducted = Number(baselineInput.initialConducted);
+      if (baselineInput.initialAttended !== '') payload.initialAttended = Number(baselineInput.initialAttended);
+      await attendanceApi.setBaseline(payload);
+      setSuccess('Mid-semester baseline attendance saved successfully.');
+      setBaselineInput({ subject: '', initialConducted: '', initialAttended: '', percentage: '' });
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving('');
+    }
+  }
+
   async function runProjection(event) {
     event.preventDefault(); setSaving('projection'); setProjection(null); setError('');
     try { const result = await attendanceApi.project(projectionInput.subject, Number(projectionInput.attend), Number(projectionInput.miss)); setProjection(result.projection); }
@@ -136,7 +162,18 @@ export default function AttendancePage() {
 
   return <div className="dash attendance-page">
     <header className="dash__bar"><div className="dash__bar-inner"><Link to="/dashboard" aria-label="Acadova dashboard"><Brand /></Link>
-      <nav className="dash__nav" aria-label="Main"><Link className="dash__link" to="/dashboard">Dashboard</Link><Link className="dash__link" to="/subjects">Subjects</Link><Link className="dash__link" to="/timetable">Timetable</Link><Link className="dash__link dash__link--active" to="/attendance" aria-current="page">Attendance</Link></nav>
+      <nav className="dash__nav" aria-label="Main">
+        <Link className="dash__link" to="/dashboard">Dashboard</Link>
+        <Link className="dash__link" to="/subjects">Subjects</Link>
+        <Link className="dash__link" to="/timetable">Timetable</Link>
+        <Link className="dash__link" to="/calendar">Calendar</Link>
+        <Link className="dash__link" to="/exams">Exams</Link>
+        <Link className="dash__link" to="/syllabus">Syllabus</Link>
+        <Link className="dash__link dash__link--active" to="/attendance" aria-current="page">Attendance</Link>
+        <Link className="dash__link" to="/study-planner">Study Planner</Link>
+        <Link className="dash__link" to="/organizer">Organizer</Link>
+        <Link className="dash__link" to="/copilot">Copilot</Link>
+      </nav>
       <div className="dash__user"><span className="dash__email" title={user.email}>{user.email}</span><button className="btn btn--ghost" onClick={logout}>Log out</button></div>
     </div></header>
     <main className="dash__main">
@@ -147,7 +184,46 @@ export default function AttendancePage() {
       {loading ? <div className="academic-loading"><Spinner label="Loading attendance" /> Loading attendance data…</div> : <>
         {summary.overall?.conducted ? <section className="attendance-overall card"><div><span>Overall attendance</span><strong>{summary.overall.percentage.toFixed(1)}%</strong><small>{summary.overall.attended} attended of {summary.overall.conducted} conducted</small></div><div className="attendance-target-note">Target: {summary.target}%</div></section> : <section className="empty-state card">Attendance data is unavailable until you record your first class.</section>}
         <section className="attendance-insights"><article className="card"><h2>Below target</h2><p>{rowsByStatus.below.length ? `${rowsByStatus.below.length} subject${rowsByStatus.below.length === 1 ? '' : 's'} below your ${summary.target}% target.` : 'No subjects are below your target.'}</p>{rowsByStatus.below.map((row) => <span className="insight-pill" key={row.subject.id}>{row.subject.name}: attend {row.classesToRecover} consecutive class{row.classesToRecover === 1 ? '' : 'es'} to recover.</span>)}</article><article className="card"><h2>At risk</h2><p>At risk means your target is currently met with 2 or fewer additional absences allowed.</p>{rowsByStatus.risk.length ? rowsByStatus.risk.map((row) => <span className="insight-pill" key={row.subject.id}>{row.subject.name}: {row.additionalAbsencesAllowed} additional absences allowed.</span>) : <p>No subjects are currently at risk.</p>}</article></section>
-        <section className="attendance-subjects"><h2>Subject attendance</h2>{summary.summaries.length ? <div className="attendance-grid">{summary.summaries.map((row) => <article className={`attendance-card card attendance-card--${row.status.replaceAll(' ', '-')}`} key={row.subject.id}><div className="attendance-card__heading"><div><h3>{row.subject.name}</h3><p>{row.subject.code}</p></div><span className="attendance-status">{row.status === 'no data' ? 'No data' : row.status}</span></div>{row.percentage === null ? <p className="no-attendance-data">No attendance data recorded yet.</p> : <><strong className="attendance-percent">{row.percentage.toFixed(1)}%</strong><p>{row.attended} attended · {row.missed} missed · {row.conducted} conducted</p><p>Target {summary.target}% · {row.additionalAbsencesAllowed} additional absences allowed</p>{row.classesToRecover > 0 && <p>Attend {row.classesToRecover} consecutive classes to reach target.</p>}</>}<button className="btn btn--ghost" onClick={() => setProjectionInput((prev) => ({ ...prev, subject: row.subject.id }))}>Project this subject</button></article>)}</div> : <div className="empty-state card">Add a subject first, then record attendance for it.</div>}</section>
+        <section className="attendance-subjects"><h2>Subject attendance</h2>{summary.summaries.length ? <div className="attendance-grid">{summary.summaries.map((row) => <article className={`attendance-card card attendance-card--${row.status.replaceAll(' ', '-')}`} key={row.subject.id}><div className="attendance-card__heading"><div><h3>{row.subject.name}</h3><p>{row.subject.code}</p></div><span className="attendance-status">{row.status === 'no data' ? 'No data' : row.status}</span></div>{row.percentage === null ? <p className="no-attendance-data">No attendance data recorded yet.</p> : <><strong className="attendance-percent">{row.percentage.toFixed(1)}%</strong><p>{row.attended} attended · {row.missed} missed · {row.conducted} conducted</p>{row.baseline?.conducted > 0 && <small className="attendance-baseline-note">Includes baseline: {row.baseline.attended} attended of {row.baseline.conducted} conducted</small>}<p>Target {summary.target}% · {row.additionalAbsencesAllowed} additional absences allowed</p>{row.classesToRecover > 0 && <p>Attend {row.classesToRecover} consecutive classes to reach target.</p>}{row.semesterEndConfigured ? <div className="attendance-term-projection"><p><strong>Semester Projection:</strong> {row.remainingScheduledClasses} remaining scheduled classes</p><p>Projected final: <strong>{row.projectedFinalAttendance !== null ? `${row.projectedFinalAttendance.toFixed(1)}%` : 'N/A'}</strong>{row.maxPossiblePercentage !== null ? ` (Max possible: ${row.maxPossiblePercentage.toFixed(1)}%)` : ''}</p></div> : <p className="attendance-term-note">Add a "Semester End Date" in the Academic Calendar to view full-term attendance projections.</p>}</>}<button className="btn btn--ghost" onClick={() => setProjectionInput((prev) => ({ ...prev, subject: row.subject.id }))}>Project this subject</button></article>)}</div> : <div className="empty-state card">Add a subject first, then record attendance for it.</div>}</section>
+        <section className="attendance-baseline card">
+          <div className="attendance-section-head">
+            <div>
+              <h2>Mid-Semester Attendance Baseline</h2>
+              <p>Joined Acadova partway through the semester? Initialize your baseline attendance without inventing fake historical records.</p>
+            </div>
+          </div>
+          <form className="attendance-baseline__form" onSubmit={saveBaseline}>
+            <div className="baseline-fields">
+              <label>Subject *
+                <select required value={baselineInput.subject} onChange={(e) => {
+                  const sId = e.target.value;
+                  const s = subjects.find((subj) => (subj._id || subj.id) === sId);
+                  setBaselineInput({
+                    subject: sId,
+                    initialConducted: s?.initialConducted || '',
+                    initialAttended: s?.initialAttended || '',
+                    percentage: '',
+                  });
+                }}>
+                  <option value="">Select subject</option>
+                  {subjects.map((s) => <option key={s._id || s.id} value={s._id || s.id}>{s.name} ({s.code})</option>)}
+                </select>
+              </label>
+              <label>Total conducted classes
+                <input type="number" min="0" placeholder="e.g. 30" value={baselineInput.initialConducted} onChange={(e) => setBaselineInput((prev) => ({ ...prev, initialConducted: e.target.value }))} />
+              </label>
+              <label>Classes attended
+                <input type="number" min="0" placeholder="e.g. 25" value={baselineInput.initialAttended} onChange={(e) => setBaselineInput((prev) => ({ ...prev, initialAttended: e.target.value }))} />
+              </label>
+              <label>OR percentage only (%)
+                <input type="number" min="0" max="100" step="0.1" placeholder="e.g. 82.5" value={baselineInput.percentage} onChange={(e) => setBaselineInput((prev) => ({ ...prev, percentage: e.target.value }))} />
+              </label>
+            </div>
+            <button className="btn btn--primary" disabled={saving === 'baseline' || !baselineInput.subject}>
+              {saving === 'baseline' ? 'Saving baseline…' : 'Save baseline attendance'}
+            </button>
+          </form>
+        </section>
         <section className="attendance-mark card"><div className="attendance-section-head"><div><h2>Mark attendance</h2><p>Classes from your weekly timetable for the selected date.</p></div><label>Date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label></div>
           {classes.length ? classes.map((item) => { const key = idOf(item.timetableEntry); const draft = drafts[key] || {}; const statusOptions = item.date > todayString() ? STATUS_OPTIONS.filter(([value]) => value === 'cancelled') : STATUS_OPTIONS; return <article className="scheduled-class" key={`${item.date}-${key}`}><div className="scheduled-class__info"><strong>{item.subject.name} ({item.subject.code})</strong><span>{item.timetableEntry.startTime}–{item.timetableEntry.endTime}{item.timetableEntry.location ? ` · ${item.timetableEntry.location}` : ''}</span></div><label>Status<select value={draft.status || ''} onChange={(e) => updateDraft(item, 'status', e.target.value)}><option value="">Choose status</option>{statusOptions.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><label className="scheduled-notes">Notes<input value={draft.notes || ''} onChange={(e) => updateDraft(item, 'notes', e.target.value)} maxLength="1000" /></label><button className="btn btn--primary" onClick={() => saveScheduled(item)} disabled={saving === key}>{saving === key ? 'Saving…' : draft.recordId ? 'Update' : 'Save'}</button></article>; }) : <p className="empty-state">No timetable classes are scheduled for {dateLabel(date)}. You can still add a manual record below.</p>}
         </section>

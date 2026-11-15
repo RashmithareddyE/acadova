@@ -13,8 +13,9 @@ const VIEWS = [
 const NAV_ITEMS = [
   { label: 'Dashboard', to: '/dashboard' }, { label: 'Subjects', to: '/subjects' },
   { label: 'Timetable', to: '/timetable' }, { label: 'Calendar', to: '/calendar' },
-  { label: 'Organizer', to: '/organizer' }, { label: 'Exams', to: '/exams' }, { label: 'Attendance', to: '/attendance' },
-  { label: 'Study Planner', to: '/study-planner' },
+  { label: 'Exams', to: '/exams' }, { label: 'Syllabus', to: '/syllabus' },
+  { label: 'Attendance', to: '/attendance' }, { label: 'Study Planner', to: '/study-planner' },
+  { label: 'Organizer', to: '/organizer' }, { label: 'Copilot', to: '/copilot' },
 ];
 const idOf = (task) => String(task?._id || task?.id || '');
 const localToday = () => {

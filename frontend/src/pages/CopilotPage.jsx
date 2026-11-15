@@ -73,6 +73,14 @@ export default function CopilotPage() {
           <Brand />
           <nav className="dash__nav" aria-label="Main navigation">
             <Link className="dash__link" to="/dashboard">Dashboard</Link>
+            <Link className="dash__link" to="/subjects">Subjects</Link>
+            <Link className="dash__link" to="/timetable">Timetable</Link>
+            <Link className="dash__link" to="/calendar">Calendar</Link>
+            <Link className="dash__link" to="/exams">Exams</Link>
+            <Link className="dash__link" to="/syllabus">Syllabus</Link>
+            <Link className="dash__link" to="/attendance">Attendance</Link>
+            <Link className="dash__link" to="/study-planner">Study Planner</Link>
+            <Link className="dash__link" to="/organizer">Organizer</Link>
             <Link className="dash__link dash__link--active" to="/copilot" aria-current="page">Copilot</Link>
           </nav>
           <div className="dash__user">

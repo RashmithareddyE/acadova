@@ -18,6 +18,11 @@ function normalizedPreferences(value = {}) { return { ...initialPreferences(), .
 
 function SessionCard({ session, onSave, onDelete, saving }) {
   const [draft, setDraft] = useState({ status: session.status, date: session.date, startTime: session.startTime, durationMinutes: session.durationMinutes });
+
+  useEffect(() => {
+    setDraft({ status: session.status, date: session.date, startTime: session.startTime, durationMinutes: session.durationMinutes });
+  }, [session.status, session.date, session.startTime, session.durationMinutes]);
+
   const endMinutes = Number(draft.startTime?.slice(0, 2)) * 60 + Number(draft.startTime?.slice(3, 5)) + Number(draft.durationMinutes);
   const endTime = Number.isFinite(endMinutes) ? `${String(Math.floor(endMinutes / 60)).padStart(2, '0')}:${String(endMinutes % 60).padStart(2, '0')}` : '';
   return <article className={`planner-session card planner-session--${draft.status}`}>
@@ -108,7 +113,7 @@ export default function StudyPlannerPage() {
   }
 
   return <div className="dash study-planner-page">
-    <header className="dash__bar"><div className="dash__bar-inner"><Link to="/dashboard" aria-label="Acadova dashboard"><Brand /></Link><nav className="dash__nav" aria-label="Main"><Link className="dash__link" to="/dashboard">Dashboard</Link><Link className="dash__link" to="/organizer">Organizer</Link><Link className="dash__link" to="/exams">Exams</Link><Link className="dash__link" to="/syllabus">Syllabus</Link><Link className="dash__link" to="/timetable">Timetable</Link><Link className="dash__link dash__link--active" to="/study-planner" aria-current="page">Study Planner</Link></nav><div className="dash__user"><span className="dash__email" title={user.email}>{user.email}</span><button className="btn btn--ghost" onClick={logout}>Log out</button></div></div></header>
+    <header className="dash__bar"><div className="dash__bar-inner"><Link to="/dashboard" aria-label="Acadova dashboard"><Brand /></Link><nav className="dash__nav" aria-label="Main"><Link className="dash__link" to="/dashboard">Dashboard</Link><Link className="dash__link" to="/subjects">Subjects</Link><Link className="dash__link" to="/timetable">Timetable</Link><Link className="dash__link" to="/calendar">Calendar</Link><Link className="dash__link" to="/exams">Exams</Link><Link className="dash__link" to="/syllabus">Syllabus</Link><Link className="dash__link" to="/attendance">Attendance</Link><Link className="dash__link dash__link--active" to="/study-planner" aria-current="page">Study Planner</Link><Link className="dash__link" to="/organizer">Organizer</Link><Link className="dash__link" to="/copilot">Copilot</Link></nav><div className="dash__user"><span className="dash__email" title={user.email}>{user.email}</span><button className="btn btn--ghost" onClick={logout}>Log out</button></div></div></header>
     <main className="dash__main">
       <div className="academic-heading"><div><p className="eyebrow"><Link to="/dashboard">Dashboard</Link> / Study Planner</p><h1 className="dash__title">Personalized exam planner</h1><p className="dash__lead">A deterministic study schedule from your confirmed exams, unfinished syllabus, and availability. No generated academic facts.</p></div></div>
       {error && <div className="alert" role="alert">{error}</div>}{notice && <p className="success-message" role="status">{notice}</p>}

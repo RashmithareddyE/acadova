@@ -10,7 +10,8 @@ const NAV_ITEMS = [
   { label: 'Subjects', to: '/subjects' }, { label: 'Timetable', to: '/timetable' },
   { label: 'Calendar', to: '/calendar' }, { label: 'Exams', to: '/exams' },
   { label: 'Syllabus', to: '/syllabus' }, { label: 'Attendance', to: '/attendance' },
-  { label: 'Copilot', to: '/copilot' }, { label: 'Organizer', to: '/organizer' }, { label: 'Study Planner', to: '/study-planner' },
+  { label: 'Study Planner', to: '/study-planner' }, { label: 'Organizer', to: '/organizer' },
+  { label: 'Copilot', to: '/copilot' },
 ];
 const idOf = (value) => value?._id || value?.id || value;
 const todayString = () => {
@@ -216,53 +217,79 @@ export default function Dashboard() {
         {notice && <p className="success-message" role="status">{notice}</p>}
 
         {loading ? <div className="today-loading"><Spinner label="Loading today's dashboard" /> Loading today’s classes and attendance…</div> : today && <>
-          {today.isHoliday && <section className="today-holiday" role="status">
-            <strong>Confirmed holiday: {today.holiday.title}</strong>
-            <span>{today.holiday.description || 'Your academic calendar marks today as a holiday.'}</span>
-            <Link to="/calendar">View academic calendar</Link>
-          </section>}
-
-          <section className="today-section" aria-labelledby="today-classes-title">
-            <div className="today-section__heading">
-              <div><h2 id="today-classes-title">Today’s classes</h2><p>Plans are intentions only. Record actual attendance separately after class.</p></div>
-              <Link className="chip" to="/timetable">Edit timetable</Link>
-            </div>
-            {classes.length ? <div className="today-class-list">{classes.map((item) => {
-              const entryId = idOf(item.timetableEntry);
-              const recordStatus = item.record?.status;
-              const plan = item.plan?.intention || '';
-              const busy = saving === entryId;
-              return <article className="today-class card" key={entryId}>
-                <div className="today-class__time"><strong>{item.timetableEntry.startTime}</strong><span>to {item.timetableEntry.endTime}</span></div>
-                <div className="today-class__details">
-                  <h3>{item.subject.name}</h3>
-                  <p>{item.subject.code}{item.timetableEntry.location ? ` · ${item.timetableEntry.location}` : ''}{item.timetableEntry.sessionType ? ` · ${item.timetableEntry.sessionType}` : ''}</p>
-                  <span className={`today-class__attendance today-class__attendance--${item.attendance?.level || 'no-data'}`}>{attendanceLabel(item.attendance)}</span>
-                  {item.attendance?.warning && <p className="today-class__warning">{item.attendance.warning}</p>}
+          {today.isHoliday ? (
+            <section className="today-holiday-banner card" role="status">
+              <div className="today-holiday-banner__header">
+                <span className="holiday-badge" aria-hidden="true">🎉</span>
+                <div>
+                  <h2 className="holiday-headline">Today is a College Holiday!</h2>
+                  <p className="holiday-title"><strong>{today.holiday?.title}</strong>{today.holiday?.description ? ` — ${today.holiday.description}` : ''}</p>
+                  <p className="holiday-suggestion">Regular classes are not scheduled today. Take this opportunity to catch up on pending assignments, review your syllabus, or prepare for upcoming exams!</p>
                 </div>
-                <div className="today-class__actions">
-                  <strong className={`today-class__state${recordStatus ? ' today-class__state--actual' : ''}`}>
-                    {recordStatus ? statusNames[recordStatus] || 'Recorded' : plan === 'attend' ? 'Plans to attend' : plan === 'miss' ? 'Plans to miss' : 'No plan recorded'}
-                  </strong>
-                  {!recordStatus && <div className="today-class__plan-actions">
-                    <button className="btn btn--ghost" type="button" onClick={() => savePlan(item, 'attend')} disabled={busy}>{plan === 'attend' ? 'Planned to attend' : 'Plan to attend'}</button>
-                    <button className="btn btn--ghost" type="button" onClick={() => savePlan(item, 'miss')} disabled={busy}>{plan === 'miss' ? 'Planned to miss' : 'Plan to miss'}</button>
-                    {plan && <button className="today-class__clear" type="button" onClick={() => savePlan(item, '')} disabled={busy}>Clear plan</button>}
-                    <div className="today-class__actual-actions" aria-label="Record actual attendance after class">
-                      <span>After class:</span>
-                      <button type="button" onClick={() => confirmActual(item, 'present')} disabled={busy}>Confirm present</button>
-                      <button type="button" onClick={() => confirmActual(item, 'absent')} disabled={busy}>Confirm absent</button>
-                    </div>
-                  </div>}
-                  {recordStatus && <Link to="/attendance">Manage attendance</Link>}
-                </div>
-              </article>;
-            })}</div> : <div className="today-empty card">
-              <h3>No timetable classes configured for today</h3>
-              <p>{today.isHoliday ? 'The calendar also confirms today is a holiday.' : 'Add your weekly classes or use manual entry to set up your timetable.'}</p>
-              <Link className="btn btn--primary" to="/timetable">Set up timetable</Link>
-            </div>}
-          </section>
+              </div>
+              <div className="holiday-actions">
+                <Link className="btn btn--primary" to="/organizer">Check pending assignments</Link>
+                <Link className="btn btn--ghost" to="/study-planner">View study planner</Link>
+                <Link className="btn btn--ghost" to="/calendar">View academic calendar</Link>
+              </div>
+              <div className="holiday-recommendations">
+                <h3>Recommended Activities for Your Holiday</h3>
+                <ul className="holiday-recommendation-list">
+                  <li><strong>Clear pending coursework:</strong> Review overdue tasks or assignments due soon.</li>
+                  <li><strong>Syllabus catch-up:</strong> Check your syllabus tracker and prepare upcoming units.</li>
+                  <li><strong>Exam readiness:</strong> Review study notes for your nearest upcoming examination.</li>
+                </ul>
+              </div>
+            </section>
+          ) : (
+            <section className="today-section" aria-labelledby="today-classes-title">
+              <div className="today-section__heading">
+                <div><h2 id="today-classes-title">Today’s classes</h2><p>Plans are intentions only. Record actual attendance separately after class.</p></div>
+                <Link className="chip" to="/timetable">Edit timetable</Link>
+              </div>
+              {classes.length ? <div className="today-class-list">{classes.map((item) => {
+                const entryId = idOf(item.timetableEntry);
+                const recordStatus = item.record?.status;
+                const plan = item.plan?.intention || '';
+                const busy = saving === entryId;
+                const faculty = item.faculty || item.timetableEntry.teacher || item.subject.teacher || '';
+                return <article className="today-class card" key={entryId}>
+                  <div className="today-class__time"><strong>{item.timetableEntry.startTime}</strong><span>to {item.timetableEntry.endTime}</span></div>
+                  <div className="today-class__details">
+                    <h3>{item.subject.name}</h3>
+                    <p>{item.subject.code}{item.timetableEntry.location ? ` · Room: ${item.timetableEntry.location}` : ''}{item.timetableEntry.sessionType ? ` · ${item.timetableEntry.sessionType}` : ''}</p>
+                    <p className="today-class__faculty"><strong>Faculty:</strong> {faculty || 'Instructor unspecified'}</p>
+                    <span className={`today-class__attendance today-class__attendance--${item.attendance?.level || 'no-data'}`}>{attendanceLabel(item.attendance)}</span>
+                    {item.attendance?.warning && <p className={`today-class__warning today-class__warning--${item.attendance.level}`}>{item.attendance.warning}</p>}
+                  </div>
+                  <div className="today-class__actions">
+                    <strong className={`today-class__state${recordStatus ? ' today-class__state--actual' : ''}`}>
+                      {recordStatus ? statusNames[recordStatus] || 'Recorded' : plan === 'attend' ? "I'll Attend" : plan === 'miss' ? "I'll Miss" : 'No intention recorded'}
+                    </strong>
+                    {plan === 'attend' && item.attendance?.projectedIfAttend != null && <span className="today-class__proj-note">Projected: {item.attendance.projectedIfAttend.toFixed(1)}%</span>}
+                    {plan === 'miss' && item.attendance?.projectedIfMiss != null && <span className="today-class__proj-note today-class__proj-note--miss">Projected: {item.attendance.projectedIfMiss.toFixed(1)}%</span>}
+                    {!recordStatus && <div className="today-class__plan-actions">
+                      <div className="today-class__intentions-group" role="group" aria-label="Attendance intention">
+                        <button className={`btn ${plan === 'attend' ? 'btn--primary' : 'btn--ghost'}`} type="button" onClick={() => savePlan(item, 'attend')} disabled={busy}>I'll Attend</button>
+                        <button className={`btn ${plan === 'miss' ? 'btn--danger' : 'btn--ghost'}`} type="button" onClick={() => savePlan(item, 'miss')} disabled={busy}>I'll Miss</button>
+                        {plan && <button className="today-class__clear" type="button" onClick={() => savePlan(item, '')} disabled={busy}>Clear</button>}
+                      </div>
+                      <div className="today-class__actual-actions" aria-label="Confirm actual attendance after class">
+                        <span>After class:</span>
+                        <button type="button" className="btn btn--present" onClick={() => confirmActual(item, 'present')} disabled={busy}>Present</button>
+                        <button type="button" className="btn btn--absent" onClick={() => confirmActual(item, 'absent')} disabled={busy}>Absent</button>
+                      </div>
+                    </div>}
+                    {recordStatus && <Link to="/attendance">Manage attendance</Link>}
+                  </div>
+                </article>;
+              })}</div> : <div className="today-empty card">
+                <h3>No timetable classes configured for today</h3>
+                <p>Add your weekly classes or use manual entry to set up your timetable.</p>
+                <Link className="btn btn--primary" to="/timetable">Set up timetable</Link>
+              </div>}
+            </section>
+          )}
 
           <section className="today-section" aria-labelledby="today-attendance-title">
             <div className="today-section__heading"><div><h2 id="today-attendance-title">Attendance to watch</h2><p>Based on confirmed present and absent records only. Plans do not affect these totals.</p></div><Link className="chip" to="/attendance">Attendance details</Link></div>

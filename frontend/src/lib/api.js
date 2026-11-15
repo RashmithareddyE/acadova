@@ -1,7 +1,8 @@
 // Framework-agnostic API client. It only uses fetch, so the same module can be
 // reused by the React Native app later (which would pass a Bearer token instead
 // of relying on the browser's httpOnly cookie).
-const BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000/api').replace(/\/$/, '');
+const DEFAULT_URL = typeof window !== 'undefined' ? '/api' : 'http://localhost:5000/api';
+const BASE_URL = (import.meta.env.VITE_API_URL || DEFAULT_URL).replace(/\/$/, '');
 
 export class ApiError extends Error {
   constructor(message, { status = 0, errors = {} } = {}) {
@@ -22,7 +23,8 @@ async function request(path, { method = 'GET', body } = {}) {
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
     });
-  } catch {
+  } catch (err) {
+    console.error(`[Acadova API] ${method} ${path} connection error:`, err);
     throw new ApiError('Cannot reach the Acadova server. Check your connection and try again.');
   }
 
@@ -69,6 +71,7 @@ export const attendanceApi = {
   update: (id, values) => api.put(`/attendance/records/${id}`, values),
   remove: (id) => api.delete(`/attendance/records/${id}`),
   project: (subject, attend, miss) => api.get(`/attendance/projection?subject=${encodeURIComponent(subject)}&attend=${attend}&miss=${miss}`),
+  setBaseline: (values) => api.put('/attendance/baseline', values),
 };
 
 export const studyPlannerApi = {
@@ -99,27 +102,42 @@ export const copilotApi = {
 };
 
 export const documentImportApi = {
-  async preview(kind, file) {
+  async preview(kind, file, options = {}) {
     const extension = file.name.split('.').pop().toLowerCase();
-    const mimeByExtension = { pdf: 'application/pdf', csv: 'text/csv', tsv: 'text/tab-separated-values', txt: 'text/plain', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+    const mimeByExtension = { pdf: 'application/pdf', csv: 'text/csv', tsv: 'text/tab-separated-values', txt: 'text/plain', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+    const query = options.semester ? `?semester=${encodeURIComponent(options.semester)}` : '';
     let response;
-    try { response = await fetch(`${BASE_URL}/imports/${kind}/preview`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': file.type || mimeByExtension[extension] || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) }, body: file }); }
-    catch { throw new ApiError('Cannot reach the Acadova server. Check your connection and try again.'); }
-    let data = null; try { data = await response.json(); } catch {}
+    try {
+      response = await fetch(`${BASE_URL}/imports/${kind}/preview${query}`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': file.type || mimeByExtension[extension] || 'application/octet-stream',
+          'X-File-Name': encodeURIComponent(file.name),
+        },
+        body: file,
+      });
+    } catch (err) {
+      console.error(`[Acadova API] preview ${kind} failed:`, err);
+      throw new ApiError('Cannot reach the Acadova server. Check your connection and try again.');
+    }
+    let data = null;
+    try { data = await response.json(); } catch {}
     if (!response.ok) throw new ApiError(data?.message || 'The document could not be processed.', { status: response.status, errors: data?.errors });
     return data;
   },
   async previewTimetable(file) {
     const extension = file.name.split('.').pop().toLowerCase();
-    const mimeByExtension = { pdf: 'application/pdf', csv: 'text/csv', tsv: 'text/tab-separated-values', txt: 'text/plain', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+    const mimeByExtension = { pdf: 'application/pdf', csv: 'text/csv', tsv: 'text/tab-separated-values', txt: 'text/plain', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
     let response;
     try {
       response = await fetch(`${BASE_URL}/imports/timetable/preview`, {
         method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': file.type || mimeByExtension[extension] || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
+        headers: { 'Content-Type': mimeByExtension[extension] || file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
         body: file,
       });
-    } catch {
+    } catch (err) {
+      console.error('[Acadova API] previewTimetable failed:', err);
       throw new ApiError('Cannot reach the Acadova server. Check your connection and try again.');
     }
     let data = null;
